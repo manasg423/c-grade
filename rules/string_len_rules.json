@@ -1,0 +1,98 @@
+{
+  "problem": "string_len",
+  "time_limit_s": 1.0,
+  "memory_limit_mb": 64,
+  "metrics": [
+    {
+      "name": "correctness",
+      "analyzer": "io_tests",
+      "weight": 0.2,
+      "params": {
+        "testset_dir": "tests/string_len/",
+        "oracle_path": "tests/string_len/oracle.c",
+        "auto_generate": true,
+        "num_generated_tests": 7,
+        "seed": 42
+      }
+    },
+    {
+      "name": "logical",
+      "analyzer": "edge_case_runner",
+      "weight": 0.1,
+      "params": {
+        "oracle_path": "tests/string_len/oracle.c",
+        "cases": [
+          "empty",
+          "whitespace"
+        ],
+        "test_inputs": [
+          "hello",
+          "0",
+          "-1"
+        ],
+        "seed": 42
+      }
+    },
+    {
+      "name": "memory_safety",
+      "analyzer": "sanitizer_run",
+      "weight": 0.1,
+      "params": {
+        "sample_input": "hello"
+      }
+    },
+    {
+      "name": "complexity",
+      "analyzer": "complexity_estimator",
+      "weight": 0.1,
+      "params": {
+        "input_type": "string",
+        "expected_complexity": "O(N)",
+        "trials": 5,
+        "base_n": 10,
+        "scale_step": 20
+      }
+    },
+    {
+      "name": "static_analysis",
+      "analyzer": "static_analysis",
+      "weight": 0.1,
+      "params": {
+        "enable_cppcheck": true,
+        "enable_gcc_warnings": true,
+        "error_penalty": 0.3,
+        "warning_penalty": 0.1
+      }
+    },
+    {
+      "name": "compiler_warnings",
+      "analyzer": "compiler_warnings",
+      "weight": 0.1,
+      "params": {}
+    },
+    {
+      "name": "modularity",
+      "analyzer": "function_split",
+      "weight": 0.1,
+      "params": {}
+    },
+    {
+      "name": "plagiarism_check",
+      "analyzer": "similarity_flag",
+      "weight": 0.1,
+      "params": {
+        "submissions_dir": "submissions/string_len/"
+      }
+    },
+    {
+      "name": "readability",
+      "analyzer": "llm_review",
+      "weight": 0.1,
+      "params": {
+        "model": "qwen3.5:2b",
+        "temperature": 0,
+        "seed": 42
+      }
+    }
+  ]
+}
