@@ -50,3 +50,6 @@ If the problem requires strings, it injects empty strings, strings containing on
 Just like the first analyzer, it feeds these boundary cases into the Teacher's oracle.c to establish the ground truth. If the Teacher's code handles an empty string by printing Error or 0, the student's code is strictly evaluated against that exact behavior. This simulates a rigorous, real-world QA environment.
 
 At the end of this pipeline, the Streamlit UI aggregates the results from the Gatekeeper and both analyzers, applies the mathematically balanced weights from the JSON rubric, and presents the student with a final grade and a detailed evidence log.
+
+7335 8948
+9310 0927
