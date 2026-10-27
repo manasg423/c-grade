@@ -2,13 +2,16 @@ import os
 import re
 import hashlib
 
-def _normalize_c_code(code_string):
-    # Strip comments
+def _strip_comments_and_whitespace(code_string):
+    """Literal normalization: only removes comments and whitespace."""
     code = re.sub(r'//.*|/\*[\s\S]*?\*/', '', code_string)
-    # Standardize strings and identifiers
+    return re.sub(r'\s+', '', code)
+
+def _normalize_structural(code_string):
+    """Structural normalization: removes comments, whitespace, and generalizes identifiers."""
+    code = re.sub(r'//.*|/\*[\s\S]*?\*/', '', code_string)
     code = re.sub(r'".*?"', 'STR', code)
     code = re.sub(r'\b[a-zA-Z_]\w*\b', 'ID', code)
-    # Strip all whitespace
     return re.sub(r'\s+', '', code)
 
 def _get_fingerprints(text, k=10, window_size=5):
@@ -31,12 +34,17 @@ def evaluate(source_path, binary_path, params, limits):
     
     try:
         with open(source_path, 'r', encoding='utf-8') as f:
-            target_code = _normalize_c_code(f.read())
+            raw_code = f.read()
+            target_structural = _normalize_structural(raw_code)
+            target_literal = _strip_comments_and_whitespace(raw_code)
     except Exception:
         return {"score": 0.0, "evidence": {}, "feedback": "Failed to read source file."}
 
-    target_fp = _get_fingerprints(target_code)
-    max_sim = 0.0
+    target_fp_struct = _get_fingerprints(target_structural)
+    target_fp_lit = _get_fingerprints(target_literal)
+    
+    max_struct_sim = 0.0
+    best_lit_sim = 0.0
     most_similar_file = "None"
     
     if os.path.exists(corpus_dir):
@@ -45,36 +53,58 @@ def evaluate(source_path, binary_path, params, limits):
                 if file.endswith('.c') and file != 'oracle.c':
                     corpus_path = os.path.join(root, file)
                     if os.path.abspath(corpus_path) == os.path.abspath(source_path):
-                        continue # Skip self-comparison
+                        continue
                         
                     with open(corpus_path, 'r', encoding='utf-8') as cf:
-                        corpus_fp = _get_fingerprints(_normalize_c_code(cf.read()))
+                        cf_raw = cf.read()
+                        corpus_struct = _normalize_structural(cf_raw)
+                        corpus_lit = _strip_comments_and_whitespace(cf_raw)
+                        
+                    corpus_fp_struct = _get_fingerprints(corpus_struct)
+                    corpus_fp_lit = _get_fingerprints(corpus_lit)
                     
-                    if not target_fp and not corpus_fp:
-                        sim = 1.0
-                    elif not target_fp or not corpus_fp:
-                        sim = 0.0
+                    # Structural Jaccard Math
+                    if not target_fp_struct and not corpus_fp_struct:
+                        sim_struct = 1.0
+                    elif not target_fp_struct or not corpus_fp_struct:
+                        sim_struct = 0.0
                     else:
-                        # Exact Jaccard token similarity math
-                        intersection = len(target_fp.intersection(corpus_fp))
-                        union = len(target_fp.union(corpus_fp))
-                        sim = intersection / union if union > 0 else 0.0
+                        union_s = len(target_fp_struct.union(corpus_fp_struct))
+                        intersection_s = len(target_fp_struct.intersection(corpus_fp_struct))
+                        sim_struct = intersection_s / union_s if union_s > 0 else 0.0
+                        
+                    # Literal Jaccard Math
+                    if not target_fp_lit and not corpus_fp_lit:
+                        sim_lit = 1.0
+                    elif not target_fp_lit or not corpus_fp_lit:
+                        sim_lit = 0.0
+                    else:
+                        union_l = len(target_fp_lit.union(corpus_fp_lit))
+                        intersection_l = len(target_fp_lit.intersection(corpus_fp_lit))
+                        sim_lit = intersection_l / union_l if union_l > 0 else 0.0
                     
-                    if sim > max_sim:
-                        max_sim = sim
+                    if sim_struct > max_struct_sim:
+                        max_struct_sim = sim_struct
+                        best_lit_sim = sim_lit
                         most_similar_file = file
 
-    # Flag only submission pairs whose structural token similarity crosses the threshold
-    is_flagged = max_sim >= threshold
+    # Exact byte-for-byte matches stay 1.0; obfuscated matches are capped at 0.95
+    effective_sim = 1.0 if best_lit_sim == 1.0 else min(max_struct_sim, 0.95)
+    
+    is_flagged = effective_sim >= threshold
     score = 0.0 if is_flagged else 1.0
+    obfuscated = (max_struct_sim >= threshold and best_lit_sim < max_struct_sim - 0.1)
 
     return {
         "score": score,
         "evidence": {
-            "max_similarity": round(max_sim, 2),
+            "effective_similarity": round(effective_sim, 2),
+            "structural_match": round(max_struct_sim, 2),
+            "literal_match": round(best_lit_sim, 2),
             "flag_threshold": threshold,
             "most_similar_file": most_similar_file,
-            "flagged": is_flagged
+            "flagged": is_flagged,
+            "obfuscation_detected": obfuscated
         },
-        "feedback": f"Max similarity {round(max_sim, 2)} against {most_similar_file}. {'Flagged for review.' if is_flagged else 'Not flagged.'}"
+        "feedback": f"Similarity {round(effective_sim, 2)} (Struct: {round(max_struct_sim, 2)}, Lit: {round(best_lit_sim, 2)}) against {most_similar_file}. {'Flagged for review.' if is_flagged else 'Not flagged.'}"
     }
