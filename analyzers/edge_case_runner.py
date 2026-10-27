@@ -292,7 +292,7 @@ def _generate_with_ollama(
     if not endpoint.endswith("/api/generate"):
         endpoint += "/api/generate"
 
-    model = str(params.get("ollama_model", "qwen3.5"))
+    model = str(params.get("ollama_model", "qwen3.5:2b"))
     timeout = _positive_number(
         params.get("ollama_timeout_s", 90),
         90,
@@ -470,7 +470,7 @@ def _save_generated_inputs(
 
     manifest = {
         "generator": "ollama-qwen3.5-edge-v1",
-        "model": metadata.get("model", "qwen3.5"),
+        "model": metadata.get("model", "qwen3.5:2b"),
         "input_format": metadata.get(
             "input_format",
             "unspecified",
@@ -797,7 +797,7 @@ def evaluate(
                 "saved_cases_reused": cache_used,
                 "ollama_model": generated_metadata.get(
                     "model",
-                    params.get("ollama_model", "qwen3.5"),
+                    params.get("ollama_model", "qwen3.5:2b"),
                 ),
                 "input_format": generated_metadata.get(
                     "input_format",
