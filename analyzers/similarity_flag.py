@@ -42,7 +42,7 @@ def evaluate(source_path, binary_path, params, limits):
     if os.path.exists(corpus_dir):
         for root, dirs, files in os.walk(corpus_dir):
             for file in files:
-                if file.endswith('.c'):
+                if file.endswith('.c') and file != 'oracle.c':
                     corpus_path = os.path.join(root, file)
                     if os.path.abspath(corpus_path) == os.path.abspath(source_path):
                         continue # Skip self-comparison
