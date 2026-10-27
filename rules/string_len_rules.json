@@ -77,11 +77,12 @@
       "params": {}
     },
     {
-      "name": "plagiarism_check",
+      "name": "originality",
       "analyzer": "similarity_flag",
-      "weight": 0.1,
+      "weight": 0.10,
       "params": {
-        "submissions_dir": "submissions/string_len/"
+        "corpus_dir": "submissions/string_len/",
+        "flag_threshold": 0.85
       }
     },
     {
