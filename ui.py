@@ -320,7 +320,7 @@ if role == "👨‍🏫 Teacher Portal":
                         "params": {
                             "oracle_path": f"tests/{problem_id}/oracle.c",
                             "cases": ["empty", "whitespace"],
-                            "test_inputs": [sample_input, "0", "-1"],
+                            "test_inputs": [sample_input, "0", "-1"], # not used anymore
                             "seed": 42
                         }
                     })
@@ -383,7 +383,7 @@ if role == "👨‍🏫 Teacher Portal":
                         "analyzer": "llm_review",
                         "raw_weight": 0.10,
                         "params": {
-                            "model": "qwen3.5:2b",
+                            "model": "qwen3.5-2b",
                             "temperature": 0,
                             "seed": 42
                         }
@@ -412,6 +412,7 @@ if role == "👨‍🏫 Teacher Portal":
                         "problem": problem_id,
                         "time_limit_s": time_limit,
                         "memory_limit_mb": int(memory_limit),
+                        "smoke_input": sample_input,
                         "metrics": final_metrics
                     }
 
@@ -532,10 +533,13 @@ else:
 
         st.info(f"Saved / Using submission in problem folder: `{sub_filepath}`")
 
+        # Dynamically fetch the smoke_input from deployed rules, fallback to "7 5\n"
+        smoke_input_val = active_rules.get("smoke_input", "7 5\n")
+
         # Run Gatekeeper First Pass
         with st.spinner("Running Phase 1 Gatekeeper & Compilation..."):
             try:
-                raw_fp = run_first_pass(sub_filepath, rule_path)
+                raw_fp = run_first_pass(sub_filepath, rule_path, smoke_input_val)
             except Exception as e:
                 raw_fp = {"error": str(e)}
             fp_info = _parse_first_pass(raw_fp, sub_filepath)
