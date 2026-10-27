@@ -383,7 +383,7 @@ if role == "👨‍🏫 Teacher Portal":
                         "analyzer": "llm_review",
                         "raw_weight": 0.10,
                         "params": {
-                            "model": "qwen3.5-2b",
+                            "model": "qwen3.5:2b",
                             "temperature": 0,
                             "seed": 42
                         }
