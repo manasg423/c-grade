@@ -278,10 +278,10 @@ if role == "👨‍🏫 Teacher Portal":
         with c2:
             use_comp = st.checkbox("complexity_estimator (10%)", value=True)
             use_stat = st.checkbox("static_analysis (10%)", value=True)
-            use_warn = st.checkbox("compiler_warnings (10%)", value=False)
+            use_warn = st.checkbox("compiler_warnings (10%)", value=True)
         with c3:
-            use_func = st.checkbox("function_split (10%)", value=False)
-            use_sim = st.checkbox("similarity_flag (10%)", value=False)
+            use_func = st.checkbox("function_split (10%)", value=True)
+            use_sim = st.checkbox("similarity_flag (10%)", value=True)
             use_llm = st.checkbox("llm_review (10%)", value=True)
 
         if st.button("💾 Save & Deploy Assignment", type="primary"):
