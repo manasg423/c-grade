@@ -1,15 +1,10 @@
 import os
 import subprocess
 import xml.etree.ElementTree as ET
+import lizard
+
 
 def evaluate(source_path: str, binary_path: str, params: dict, limits: dict) -> dict:
-    """
-    Universal static analyzer using cppcheck and GCC diagnostic passes.
-    Returns:
-        score: float in [0.0, 1.0]
-        evidence: detailed findings categorized by severity
-        feedback: actionable summary of warnings/errors
-    """
     if not os.path.exists(source_path):
         return {
             "score": 0.0,
@@ -17,128 +12,189 @@ def evaluate(source_path: str, binary_path: str, params: dict, limits: dict) -> 
             "feedback": "Evaluation failed: source file missing."
         }
 
-    enable_cppcheck = params.get("enable_cppcheck", True)
-    enable_gcc_warnings = params.get("enable_gcc_warnings", True)
-
     deductions = {
         "error": params.get("error_penalty", 0.40),
         "warning": params.get("warning_penalty", 0.15),
-        "style": params.get("style_penalty", 0.05),
-        "performance": params.get("performance_penalty", 0.05),
-        "portability": params.get("portability_penalty", 0.05)
+        "style": params.get("style_penalty", 0.05)
     }
 
+    max_complexity = params.get("max_cyclomatic", 8)
     issues = []
     total_deduction = 0.0
+    analyzer_failures = []
 
-    # 1. Cppcheck Analysis (XML output)
-    if enable_cppcheck:
+    def add_issue(tool, severity, issue_id, line, message):
+        nonlocal total_deduction
+
+        penalty = deductions.get(severity, 0.0)
+        total_deduction += penalty
+
+        issues.append({
+            "tool": tool,
+            "severity": severity,
+            "id": issue_id,
+            "line": line,
+            "message": message,
+            "penalty": penalty
+        })
+
+    # 1. Cppcheck
+    if params.get("enable_cppcheck", True):
         try:
-            cmd = [
-                "cppcheck",
-                "--enable=all",
-                "--inconclusive",
-                "--xml",
-                "--xml-version=2",
-                source_path
-            ]
-            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10.0)
-            xml_output = proc.stderr
+            result = subprocess.run(
+                [
+                    "cppcheck", "--enable=warning,style,performance,portability",
+                    "--xml", "--xml-version=2", source_path
+                ],
+                capture_output=True, text=True, timeout=10
+            )
 
-            if xml_output.strip().startswith("<?xml") or "<results>" in xml_output:
-                root = ET.fromstring(xml_output)
-                errors_node = root.find("errors")
-                if errors_node is not None:
-                    for err in errors_node.findall("error"):
-                        err_id = err.get("id", "unknown")
-                        severity = err.get("severity", "warning").lower()
-                        msg = err.get("msg", "")
+            if result.stderr.strip():
+                root = ET.fromstring(result.stderr)
 
-                        if err_id in ("missingInclude", "missingIncludeSystem", "checkersReport"):
-                            continue
+                for error in root.findall(".//error"):
+                    if error.get("id") in (
+                        "missingInclude", "missingIncludeSystem", "checkersReport"
+                    ):
+                        continue
 
-                        location = err.find("location")
-                        line_no = int(location.get("line", 0)) if location is not None else 0
+                    location = error.find("location")
+                    line = int(location.get("line", 0)) if location is not None else 0
+                    severity = error.get("severity", "warning").lower()
 
-                        penalty = deductions.get(severity, 0.05)
-                        total_deduction += penalty
+                    if severity not in deductions:
+                        severity = "warning"
 
-                        issues.append({
-                            "tool": "cppcheck",
-                            "severity": severity,
-                            "id": err_id,
-                            "line": line_no,
-                            "message": msg
-                        })
+                    add_issue(
+                        "cppcheck", severity, error.get("id", "unknown"),
+                        line, error.get("msg", "")
+                    )
+
         except Exception as e:
-            issues.append({
-                "tool": "cppcheck",
-                "severity": "info",
-                "id": "tool_failure",
-                "line": 0,
-                "message": f"Cppcheck inspection skipped: {type(e).__name__}"
-            })
+            analyzer_failures.append(f"Cppcheck: {type(e).__name__}")
 
-    # 2. GCC Diagnostic Pass (-Wall -Wextra -Wpedantic)
-    if enable_gcc_warnings:
+    # 2. GCC warnings and errors
+    if params.get("enable_gcc_warnings", True):
         try:
-            gcc_cmd = [
-                "gcc",
-                "-fsyntax-only",
-                "-Wall",
-                "-Wextra",
-                "-Wpedantic",
-                source_path
-            ]
-            proc_gcc = subprocess.run(gcc_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10.0)
+            result = subprocess.run(
+                ["gcc", "-fsyntax-only", "-Wall", "-Wextra",
+                 "-Wpedantic", source_path],
+                capture_output=True, text=True, timeout=10
+            )
 
-            for line in proc_gcc.stderr.splitlines():
-                if ": warning:" in line or ": error:" in line:
-                    parts = line.split(":", 4)
-                    if len(parts) >= 4:
-                        try:
-                            line_no = int(parts[1].strip())
-                        except ValueError:
-                            line_no = 0
+            for line in result.stderr.splitlines():
+                if ": warning:" not in line and ": error:" not in line:
+                    continue
 
-                        is_err = ": error:" in line
-                        sev = "error" if is_err else "warning"
-                        msg = parts[-1].strip()
+                parts = line.split(":", 4)
+                try:
+                    line_no = int(parts[1])
+                except (ValueError, IndexError):
+                    line_no = 0
 
-                        total_deduction += deductions.get(sev, 0.10)
-                        issues.append({
-                            "tool": "gcc",
-                            "severity": sev,
-                            "id": "compiler_diagnostic",
-                            "line": line_no,
-                            "message": msg
-                        })
-        except Exception:
-            pass
+                severity = "error" if ": error:" in line else "warning"
+                message = parts[-1].strip()
 
-    final_score = max(0.0, 1.0 - total_deduction)
-    final_score = round(final_score, 2)
+                add_issue(
+                    "gcc", severity, "compiler_diagnostic",
+                    line_no, message
+                )
 
-    if not issues:
-        feedback = "Static check passed clean. Zero warnings, undefined behaviors, or compiler diagnostics detected."
+        except Exception as e:
+            analyzer_failures.append(f"GCC: {type(e).__name__}")
+        # Formatting check using clang-format
+
+    # Basic formatting check
+    if params.get("enable_format_check", True):
+        try:
+            with open(source_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+
+            bad_lines = 0
+
+            for line in lines:
+                stripped = line.strip()
+
+                if len(stripped) > 120:
+                    bad_lines += 1
+
+                # Multiple statements on one line
+                if stripped.count(";") > 1:
+                    bad_lines += 1
+
+                # Multiple control structures on one line
+                if ("if(" in stripped or "for(" in stripped
+                        or "while(" in stripped) and ";" in stripped:
+                    bad_lines += 1
+
+            if bad_lines > 0:
+                add_issue(
+                    "formatting",
+                    "style",
+                    "poor_formatting",
+                    0,
+                    f"Poor formatting detected in {bad_lines} places."
+                )
+
+        except Exception as e:
+            analyzer_failures.append(
+                f"Formatting check: {type(e).__name__}"
+            )
+    # 3. Lizard: cyclomatic complexity only
+    if params.get("enable_lizard", True):
+        try:
+            analysis = lizard.analyze_file(source_path)
+
+            for function in analysis.function_list:
+                complexity = function.cyclomatic_complexity
+
+                if complexity > max_complexity:
+                    add_issue(
+                        "lizard", "warning", "high_complexity",
+                        function.start_line,
+                        f"Function '{function.name}' has cyclomatic "
+                        f"complexity {complexity}; maximum allowed is "
+                        f"{max_complexity}."
+                    )
+
+        except Exception as e:
+            analyzer_failures.append(f"Lizard: {type(e).__name__}")
+
+    score = round(max(0.0, 1.0 - total_deduction), 2)
+
+    if issues:
+        error_count = sum(i["severity"] == "error" for i in issues)
+        warning_count = sum(i["severity"] == "warning" for i in issues)
+        style_count = sum(i["severity"] == "style" for i in issues)
+
+        summary = []
+        if error_count:
+            summary.append(f"{error_count} error(s)")
+        if warning_count:
+            summary.append(f"{warning_count} warning(s)")
+        if style_count:
+            summary.append(f"{style_count} style issue(s)")
+
+        highlights = [
+            f"L{i['line']}: {i['message']}" for i in issues[:2]
+        ]
+        feedback = (
+            f"Detected {', '.join(summary)}. Issues: "
+            + "; ".join(highlights)
+        )
     else:
-        err_count = sum(1 for i in issues if i["severity"] == "error")
-        warn_count = sum(1 for i in issues if i["severity"] in ("warning", "style", "portability"))
-        summary_parts = []
-        if err_count:
-            summary_parts.append(f"{err_count} static error(s)")
-        if warn_count:
-            summary_parts.append(f"{warn_count} warning(s)")
+        feedback = "No penalized issues detected."
 
-        highlights = [f"L{i['line']}: {i['message']}" for i in issues[:2]]
-        feedback = f"Detected {', '.join(summary_parts)}. Issues: {'; '.join(highlights)}"
+    if analyzer_failures:
+        feedback += " Analyzer failures: " + "; ".join(analyzer_failures)
 
     return {
-        "score": final_score,
+        "score": score,
         "evidence": {
             "total_issues": len(issues),
             "issues": issues,
-            "deductions_applied": round(total_deduction, 2)
+            "deductions_applied": round(total_deduction, 2),
+            "analyzer_failures": analyzer_failures
         },
         "feedback": feedback
     }

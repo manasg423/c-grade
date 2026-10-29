@@ -4,7 +4,7 @@ import hashlib
 import subprocess
 from core.sandbox import run_safe
 
-def run_first_pass(source_path: str, rules_path: str) -> dict:
+def run_first_pass(source_path: str, rules_path: str, smoke_input: str = "7 5\n") -> dict:
     result = {
         "rules_hash": "",
         "rules_valid": False,
@@ -65,11 +65,14 @@ def run_first_pass(source_path: str, rules_path: str) -> dict:
     result["compiled"] = True
     result["binary_path"] = binary_path
 
-    # 4. Smoke Run (Test with 1 sample input under 1s / 64MB)
+    # 4. Smoke Run (Test with user-defined sample input under time/memory limits)
     time_limit = rules.get("time_limit_s", 1.0)
     mem_limit = rules.get("memory_limit_mb", 64)
 
-    smoke_run = run_safe([binary_path], stdin_data="7 5\n", timeout_s=time_limit, memory_mb=mem_limit)
+    if not smoke_input.endswith('\n'):
+        smoke_input += '\n'
+
+    smoke_run = run_safe([binary_path], stdin_data=smoke_input, timeout_s=time_limit, memory_mb=mem_limit)
 
     if smoke_run["timed_out"]:
         result["suspected_infinite_loop"] = True
