@@ -1,8 +1,10 @@
-venv/
+.venv/
 __pycache__/
 *.pyc
 *.o
 .DS_Store
 reports/
-tests/*/auto_generated/
+tests/
+rules/
+submissions/
 /tmp/

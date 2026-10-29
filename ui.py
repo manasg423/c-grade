@@ -252,7 +252,7 @@ if role == "👨‍🏫 Teacher Portal":
             )
             expected_complexity = st.selectbox(
                 "Expected Asymptotic Complexity:",
-                ["O(1)", "O(N)", "O(N log N)", "O(N^2)"]
+                ["O(1)","O(log N)", "O(N)", "O(N log N)", "O(N^2)","O(N^3)"]
             )
             auto_gen_count = st.slider("Auto-Generated I/O Test Cases:", min_value=1, max_value=20, value=5)
 
