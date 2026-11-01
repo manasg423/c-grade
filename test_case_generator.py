@@ -20,8 +20,8 @@ Design Principles:
      Pipes each generated input to stdin and captures stdout to produce matching .out files.
 
 Output Structure:
-  tests/<problem>/auto_generated/gen_X.in  &  gen_X.out
-  tests/<problem>/edge_cases/edge_XX.in    &  edge_XX.out
+  problems/<problem>/tests/auto_generated/gen_X.in  &  gen_X.out
+  problems/<problem>/tests/edge_cases/edge_XX.in    &  edge_XX.out
 
 Public API:
   generate_all_test_cases(problem_id, tests_dir=None, oracle_path=None, sample_input=None, num_io=5, num_edge=5) -> dict
@@ -186,7 +186,6 @@ def generate_tests_with_llm(
     needed_io = max(1, num_io)
     needed_edge = max(1, num_edge)
 
-    # Use randomized temperature and seed to ensure every regeneration produces fresh, distinct test cases
     gen_seed = random.randint(1, 1000000)
     gen_temp = round(random.uniform(0.35, 0.75), 2)
 
@@ -221,14 +220,12 @@ def generate_tests_with_llm(
             if st_clean and st_clean + "\n" not in edge_results:
                 edge_results.append(st_clean + "\n")
 
-    # If the LLM returned fewer than requested, synthesize variations of the LLM outputs
     rng = random.Random(gen_seed)
     while len(io_results) < needed_io and io_results:
         base = io_results[len(io_results) % len(io_results)]
         lines = [l.strip() for l in base.strip().split("\n") if l.strip()]
         if len(lines) == 2:
             body_parts = lines[1].split()
-            # Permute body tokens preserving counts/majority
             perm = list(body_parts)
             rng.shuffle(perm)
             var_inp = f"{lines[0]}\n" + " ".join(perm) + "\n"
@@ -238,7 +235,6 @@ def generate_tests_with_llm(
                 break
         elif len(lines) == 1:
             tokens = lines[0].split()
-            # Mutate with offset
             offset = rng.randint(2, 10)
             mut_tokens = []
             for t in tokens:
@@ -254,7 +250,6 @@ def generate_tests_with_llm(
         else:
             break
 
-    # Normalize inputs formatting to match multi-line sample if single line returned
     normalized_io = [_ensure_multiline_format(inp, sample_input) for inp in io_results]
     normalized_edge = [_ensure_multiline_format(inp, sample_input) for inp in edge_results]
 
@@ -278,7 +273,6 @@ def _ensure_multiline_format(inp_str: str, sample_input: Optional[str]) -> str:
     if not lines:
         return "\n"
 
-    # If single-line but sample_input has multiple lines
     if len(lines) == 1 and sample_input and "\n" in sample_input.strip():
         sample_lines = [l.strip() for l in sample_input.strip().split("\n") if l.strip()]
         k = len(sample_lines[0].split())
@@ -286,7 +280,6 @@ def _ensure_multiline_format(inp_str: str, sample_input: Optional[str]) -> str:
         if len(tokens) > k:
             lines = [" ".join(tokens[:k]), " ".join(tokens[k:])]
 
-    # Reconcile size header with array length if 2 lines
     if len(lines) == 2:
         header_tokens = lines[0].split()
         body_tokens = lines[1].split()
@@ -319,7 +312,6 @@ def emergency_fallback_tests(sample_input: Optional[str], num_io: int, num_edge:
     if sample_input and sample_input.strip():
         lines = [l.strip() for l in sample_input.strip().split("\n") if l.strip()]
         io_cases.append(sample_input.strip() + "\n")
-        # Mutate numbers
         for _ in range(num_io - 1):
             mutated_lines = []
             for l in lines:
@@ -362,11 +354,11 @@ def generate_all_test_cases(
     """
     Universal test case generator.
     Writes:
-      tests/<problem>/auto_generated/gen_X.in  &  gen_X.out
-      tests/<problem>/edge_cases/edge_XX.in    &  edge_XX.out
+      problems/<problem>/tests/auto_generated/gen_X.in  &  gen_X.out
+      problems/<problem>/tests/edge_cases/edge_XX.in    &  edge_XX.out
     """
     if not tests_dir:
-        tests_dir = os.path.join("tests", problem_id)
+        tests_dir = os.path.join("problems", problem_id, "tests")
     if not oracle_path:
         oracle_path = os.path.join(tests_dir, "oracle.c")
 
@@ -382,9 +374,9 @@ def generate_all_test_cases(
         with open(oracle_path, "r", encoding="utf-8", errors="ignore") as f:
             oracle_code = f.read()
 
-    # If sample_input not passed, attempt reading from rules JSON
+    # If sample_input not passed, attempt reading from rules JSON in problems/<problem>/
     if not sample_input:
-        rules_file = os.path.join("rules", f"{problem_id}_rules.json")
+        rules_file = os.path.join("problems", problem_id, f"{problem_id}_rules.json")
         if os.path.isfile(rules_file):
             try:
                 with open(rules_file, "r", encoding="utf-8") as rf:
@@ -448,7 +440,6 @@ def generate_all_test_cases(
             with open(in_file, "w", encoding="utf-8") as f_in:
                 f_in.write(inp)
 
-            # Ground-truth .out generated purely via blackbox oracle execution
             expected_out = ""
             if oracle_bin:
                 expected_out = run_oracle(oracle_bin, inp)
@@ -458,7 +449,6 @@ def generate_all_test_cases(
 
             generated_io_files.append((f"gen_{idx:02d}.in", f"gen_{idx:02d}.out"))
 
-        # Write auto_generated manifest
         with open(os.path.join(auto_dir, ".ollama_manifest.json"), "w", encoding="utf-8") as mf:
             json.dump({
                 "generator": method,
@@ -476,7 +466,6 @@ def generate_all_test_cases(
             with open(in_file, "w", encoding="utf-8") as f_in:
                 f_in.write(inp)
 
-            # Ground-truth .out generated purely via blackbox oracle execution
             expected_out = ""
             if oracle_bin:
                 expected_out = run_oracle(oracle_bin, inp)
@@ -486,7 +475,6 @@ def generate_all_test_cases(
 
             generated_edge_files.append((f"edge_{idx:02d}.in", f"edge_{idx:02d}.out"))
 
-        # Write edge_cases manifest
         with open(os.path.join(edge_dir, ".manifest.json"), "w", encoding="utf-8") as mf:
             json.dump({
                 "generator": method,
