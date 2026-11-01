@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+*.o
+.DS_Store
+reports/
+tests/
+rules/
+submissions/
+/tmp/
