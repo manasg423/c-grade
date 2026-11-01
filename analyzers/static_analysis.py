@@ -1,7 +1,10 @@
 import os
 import subprocess
 import xml.etree.ElementTree as ET
-import lizard
+try:
+    import lizard
+except ImportError:
+    lizard = None
 
 
 def evaluate(source_path: str, binary_path: str, params: dict, limits: dict) -> dict:
@@ -141,7 +144,7 @@ def evaluate(source_path: str, binary_path: str, params: dict, limits: dict) -> 
                 f"Formatting check: {type(e).__name__}"
             )
     # 3. Lizard: cyclomatic complexity only
-    if params.get("enable_lizard", True):
+    if params.get("enable_lizard", True) and lizard is not None:
         try:
             analysis = lizard.analyze_file(source_path)
 

@@ -1,0 +1,13 @@
+{
+  "generator": "sample-input-fuzzer",
+  "problem": "two_sum",
+  "oracle_compiled": false,
+  "count": 5,
+  "files": [
+    "edge_01.in",
+    "edge_02.in",
+    "edge_03.in",
+    "edge_04.in",
+    "edge_05.in"
+  ]
+}

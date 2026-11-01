@@ -13,6 +13,8 @@ import streamlit as st
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
 from core.first_pass import run_first_pass
+from core.reporter import generate_report
+from test_case_generator import generate_all_test_cases
 
 st.set_page_config(
     page_title="C-Grade: Automated C Assessment",
@@ -229,7 +231,9 @@ st.sidebar.markdown("---")
 # =========================================================
 if role == "👨‍🏫 Teacher Portal":
     st.title("Teacher Portal — Assignment & Rubric Builder")
-    teacher_tab1, teacher_tab2 = st.tabs(["➕ Create / Update Assignment", "📋 Inspect Deployed Rules"])
+    teacher_tab1, teacher_tab2, teacher_tab3 = st.tabs(
+        ["➕ Create / Update Assignment", "📋 Inspect Deployed Rules", "⚡ Batch Grade"]
+    )
 
     with teacher_tab1:
         st.subheader("Configure New Problem")
@@ -420,24 +424,355 @@ if role == "👨‍🏫 Teacher Portal":
                     with open(rule_file, "w", encoding="utf-8") as rf:
                         json.dump(rules_obj, rf, indent=2)
 
+                    # Generate I/O test cases and Edge cases ahead of time
+                    with st.spinner("Generating I/O and Edge Test Cases using Oracle & LLM..."):
+                        try:
+                            gen_res = generate_all_test_cases(
+                                problem_id,
+                                tests_dir=prob_test_dir,
+                                oracle_path=oracle_path,
+                                num_io=int(auto_gen_count),
+                                num_edge=5,
+                                force_regenerate=True
+                            )
+                            test_summary = f"- Generated {gen_res['io_count']} I/O test cases and {gen_res['edge_count']} Edge cases (.in / .out)"
+                        except Exception as e:
+                            test_summary = f"- Test generation note: {e}"
+
                     st.success(
                         f"Deployed '{problem_id}'!\n"
                         f"- Created Submissions Folder: `{prob_sub_dir}/`\n"
                         f"- Created Tests Folder: `{prob_test_dir}/`\n"
+                        f"{test_summary}\n"
                         f"- Saved Rules: `{rule_file}`"
                     )
 
     with teacher_tab2:
-        st.subheader("Inspect Existing Rules JSON")
+        st.subheader("Inspect Rules & Test Cases")
         probs = list_available_problems()
         if not probs:
             st.info("No rules found.")
         else:
-            sel = st.selectbox("Select Problem:", probs)
+            sel = st.selectbox("Select Problem:", probs, key="inspect_prob")
             r_path = os.path.join("rules", f"{sel}_rules.json")
-            with open(r_path, "r", encoding="utf-8") as f:
-                st.json(json.load(f))
+            prob_tests_dir = os.path.join("tests", sel)
+            auto_dir = os.path.join(prob_tests_dir, "auto_generated")
+            edge_dir = os.path.join(prob_tests_dir, "edge_cases")
 
+            # Load existing rules
+            try:
+                with open(r_path, "r", encoding="utf-8") as f:
+                    rules_data = json.load(f)
+            except Exception:
+                rules_data = {}
+
+            # Find current test counts from rules and disk
+            cur_io_in_files = sorted(glob.glob(os.path.join(auto_dir, "gen_*.in")))
+            if not cur_io_in_files:
+                cur_io_in_files = sorted(glob.glob(os.path.join(prob_tests_dir, "*.in")))
+            cur_edge_in_files = sorted(glob.glob(os.path.join(edge_dir, "edge_*.in")))
+
+            rule_io_count = 5
+            for m in rules_data.get("metrics", []):
+                if m.get("analyzer") == "io_tests":
+                    rule_io_count = m.get("params", {}).get("num_generated_tests", len(cur_io_in_files) or 5)
+                    break
+            rule_edge_count = len(cur_edge_in_files) or 5
+
+            # -----------------------------------------------------
+            # Editable Rules & Configuration Section
+            # -----------------------------------------------------
+            st.markdown("### ⚙️ Edit Problem Rules & Test Configuration")
+            st.caption(
+                "Modify parameters, test case counts, or metrics below. "
+                "Saving updates `rules.json` and immediately synchronizes the test suite."
+            )
+
+            er_col1, er_col2 = st.columns(2)
+            with er_col1:
+                e_time = st.number_input(
+                    "Time Limit (seconds):",
+                    min_value=0.2, max_value=10.0,
+                    value=float(rules_data.get("time_limit_s", 1.0)),
+                    step=0.5,
+                    key=f"e_time_{sel}"
+                )
+                e_mem = st.number_input(
+                    "Memory Limit (MB):",
+                    min_value=16, max_value=512,
+                    value=int(rules_data.get("memory_limit_mb", 64)),
+                    step=16,
+                    key=f"e_mem_{sel}"
+                )
+                e_smoke = st.text_input(
+                    "Sample Smoke Input:",
+                    value=str(rules_data.get("smoke_input", "10 20")),
+                    key=f"e_smoke_{sel}"
+                )
+
+            with er_col2:
+                e_io_count = st.number_input(
+                    "Number of I/O Test Cases:",
+                    min_value=1, max_value=30,
+                    value=int(rule_io_count),
+                    step=1,
+                    key=f"e_io_count_{sel}"
+                )
+                e_edge_count = st.number_input(
+                    "Number of Edge Cases:",
+                    min_value=1, max_value=20,
+                    value=int(rule_edge_count),
+                    step=1,
+                    key=f"e_edge_count_{sel}"
+                )
+
+            with st.expander("📝 Advanced Rules JSON Editor", expanded=False):
+                st.caption("Directly edit the raw rules configuration JSON. Total weights must sum to 1.00.")
+                raw_json_edit = st.text_area(
+                    "Rules JSON Content:",
+                    value=json.dumps(rules_data, indent=2),
+                    height=280,
+                    key=f"raw_json_area_{sel}"
+                )
+
+            if st.button("💾 Save Rules & Update Test Cases", type="primary", key=f"save_rules_btn_{sel}"):
+                try:
+                    try:
+                        parsed_rules = json.loads(raw_json_edit)
+                    except json.JSONDecodeError as jde:
+                        st.error(f"Invalid JSON in advanced editor: {jde}")
+                        parsed_rules = rules_data
+
+                    parsed_rules["time_limit_s"] = float(e_time)
+                    parsed_rules["memory_limit_mb"] = int(e_mem)
+                    parsed_rules["smoke_input"] = str(e_smoke)
+
+                    # Update num_generated_tests inside io_tests metric params
+                    for m in parsed_rules.get("metrics", []):
+                        if m.get("analyzer") == "io_tests":
+                            if "params" not in m:
+                                m["params"] = {}
+                            m["params"]["num_generated_tests"] = int(e_io_count)
+
+                    # Validate total weight
+                    tot_w = sum(m.get("weight", 0.0) for m in parsed_rules.get("metrics", []))
+                    if abs(tot_w - 1.0) > 1e-4:
+                        st.warning(f"Note: Metric weights sum to {tot_w:.2f} (expected 1.00). Normalizing...")
+                        for m in parsed_rules.get("metrics", []):
+                            m["weight"] = round(m.get("weight", 0.0) / tot_w, 2)
+
+                    # Write back to rules JSON
+                    with open(r_path, "w", encoding="utf-8") as rf:
+                        json.dump(parsed_rules, rf, indent=2)
+
+                    # Automatically regenerate test cases with updated counts
+                    oracle_file = os.path.join(prob_tests_dir, "oracle.c")
+                    with st.spinner(f"Regenerating {e_io_count} I/O tests & {e_edge_count} edge cases for {sel}..."):
+                        res = generate_all_test_cases(
+                            sel,
+                            tests_dir=prob_tests_dir,
+                            oracle_path=oracle_file,
+                            sample_input=str(e_smoke),
+                            num_io=int(e_io_count),
+                            num_edge=int(e_edge_count),
+                            force_regenerate=True
+                        )
+
+                    st.success(f"Rules updated in `{r_path}`!\n- Regenerated {res['io_count']} I/O test cases and {res['edge_count']} edge cases with matching .out files.")
+                    st.rerun()
+
+                except Exception as exc:
+                    st.error(f"Failed to update rules: {exc}")
+
+            st.markdown("---")
+            st.subheader(f"🧪 Test Cases for `{sel}`")
+
+            tc_col1, tc_col2 = st.columns(2)
+
+            # I/O Test Cases Column
+            with tc_col1:
+                st.markdown("#### 📥 Standard I/O Test Cases")
+                io_in_files = sorted(glob.glob(os.path.join(auto_dir, "gen_*.in")))
+                if not io_in_files:
+                    io_in_files = sorted(glob.glob(os.path.join(prob_tests_dir, "*.in")))
+
+                if not io_in_files:
+                    st.warning("No I/O test cases generated yet.")
+                else:
+                    st.caption(f"Found {len(io_in_files)} I/O test case(s).")
+                    for in_f in io_in_files:
+                        base = os.path.splitext(os.path.basename(in_f))[0]
+                        out_f = os.path.join(os.path.dirname(in_f), f"{base}.out")
+                        with st.expander(f"📄 {base}", expanded=False):
+                            c_in, c_out = st.columns(2)
+                            with open(in_f, "r", encoding="utf-8", errors="ignore") as fi:
+                                in_txt = fi.read()
+                            with c_in:
+                                st.caption("Standard Input (`.in`)")
+                                st.code(in_txt if in_txt.strip() else "(empty)", language="text")
+                            with c_out:
+                                st.caption("Expected Output (`.out`)")
+                                if os.path.isfile(out_f):
+                                    with open(out_f, "r", encoding="utf-8", errors="ignore") as fo:
+                                        out_txt = fo.read()
+                                    st.code(out_txt if out_txt.strip() else "(empty)", language="text")
+                                else:
+                                    st.caption("*(No .out file)*")
+
+            # Edge Cases Column
+            with tc_col2:
+                st.markdown("#### ⚡ Adversarial Edge Cases")
+                edge_in_files = sorted(glob.glob(os.path.join(edge_dir, "edge_*.in")))
+                if not edge_in_files:
+                    st.warning("No edge cases generated yet.")
+                else:
+                    st.caption(f"Found {len(edge_in_files)} edge case(s).")
+                    for in_f in edge_in_files:
+                        base = os.path.splitext(os.path.basename(in_f))[0]
+                        out_f = os.path.join(edge_dir, f"{base}.out")
+                        with st.expander(f"⚠️ {base}", expanded=False):
+                            c_in, c_out = st.columns(2)
+                            with open(in_f, "r", encoding="utf-8", errors="ignore") as fi:
+                                in_txt = fi.read()
+                            with c_in:
+                                st.caption("Boundary Input (`.in`)")
+                                st.code(in_txt if in_txt.strip() else "(empty)", language="text")
+                            with c_out:
+                                st.caption("Expected Output (`.out`)")
+                                if os.path.isfile(out_f):
+                                    with open(out_f, "r", encoding="utf-8", errors="ignore") as fo:
+                                        out_txt = fo.read()
+                                    st.code(out_txt if out_txt.strip() else "(empty)", language="text")
+                                else:
+                                    st.caption("*(No .out file)*")
+
+            # Regeneration Controls
+            # st.markdown("---")
+            # st.subheader("🔄 Quick Regenerate Test Cases")
+            # st.caption("Synthesize a fresh set of I/O test cases and edge cases (.in / .out) and synchronize rules.json.")
+
+            # rg1, rg2 = st.columns(2)
+            # with rg1:
+            #     cur_io = max(5, len(io_in_files) if io_in_files else 5)
+            #     regen_io = st.slider("Number of I/O Test Cases:", min_value=1, max_value=20, value=min(20, cur_io), key="regen_io")
+            # with rg2:
+            #     cur_edge = max(5, len(edge_in_files) if edge_in_files else 5)
+            #     regen_edge = st.slider("Number of Edge Cases:", min_value=1, max_value=15, value=min(15, cur_edge), key="regen_edge")
+
+            # if st.button("🔄 Regenerate Test Cases Now", type="primary", key="regen_btn"):
+            #     oracle_file = os.path.join(prob_tests_dir, "oracle.c")
+            #     with st.spinner(f"Regenerating test cases for {sel} via test_case_generator.py..."):
+            #         try:
+            #             # Also update rules.json with new test count
+            #             try:
+            #                 with open(r_path, "r", encoding="utf-8") as rf:
+            #                     r_json = json.load(rf)
+            #                 for m in r_json.get("metrics", []):
+            #                     if m.get("analyzer") == "io_tests":
+            #                         if "params" not in m:
+            #                             m["params"] = {}
+            #                         m["params"]["num_generated_tests"] = int(regen_io)
+            #                 with open(r_path, "w", encoding="utf-8") as rf:
+            #                     json.dump(r_json, rf, indent=2)
+            #             except Exception:
+            #                 pass
+
+            #             res = generate_all_test_cases(
+            #                 sel,
+            #                 tests_dir=prob_tests_dir,
+            #                 oracle_path=oracle_file,
+            #                 sample_input=rules_data.get("smoke_input", ""),
+            #                 num_io=int(regen_io),
+            #                 num_edge=int(regen_edge),
+            #                 force_regenerate=True
+            #             )
+            #             st.success(f"Regenerated {res['io_count']} I/O test cases and {res['edge_count']} edge cases with matching .out files!")
+            #             st.rerun()
+            #         except Exception as exc:
+            #             st.error(f"Regeneration failed: {exc}")
+
+
+
+    with teacher_tab3:
+        st.subheader("Batch Grade \u2014 Grade All Submissions for a Problem")
+        st.caption(
+            "Select a problem and click **Run Batch Grade** to evaluate every `.c` file "
+            "in `submissions/<problem>/` automatically. Reports are saved to `reports/<problem>/`."
+        )
+
+        probs_batch = list_available_problems()
+        if not probs_batch:
+            st.info("No assignments found. Create one in the 'Create / Update Assignment' tab.")
+        else:
+            batch_problem    = st.selectbox("Problem to batch-grade:", probs_batch, key="batch_prob")
+            batch_rules_path = os.path.join("rules", f"{batch_problem}_rules.json")
+            batch_sub_dir    = os.path.join("submissions", batch_problem)
+            batch_files      = sorted(glob.glob(os.path.join(batch_sub_dir, "*.c")))
+
+            if batch_files:
+                st.info(f"Found **{len(batch_files)}** submission(s) in `{batch_sub_dir}/`.")
+            else:
+                st.warning(f"No `.c` files found in `{batch_sub_dir}/`.")
+
+            if st.button("\u26a1 Run Batch Grade", type="primary", key="batch_btn"):
+                if not batch_files:
+                    st.error("No submissions to grade.")
+                else:
+                    batch_rules        = ensure_valid_rules_weights(batch_rules_path)
+                    batch_results_rows = []
+                    batch_progress     = st.progress(0)
+                    batch_status       = st.empty()
+
+                    for b_idx, src in enumerate(batch_files):
+                        fname = os.path.basename(src)
+                        batch_status.text(
+                            f"Grading {fname}  ({b_idx + 1}/{len(batch_files)}) \u2026"
+                        )
+
+                        smoke_val = batch_rules.get("smoke_input", "7 5\n")
+                        try:
+                            raw_fp = run_first_pass(src, batch_rules_path, smoke_val)
+                        except Exception as exc:
+                            raw_fp = {"error": str(exc)}
+                        fp_info = _parse_first_pass(raw_fp, src)
+
+                        bin_path  = fp_info["binary_path"]
+                        b_metrics = batch_rules.get("metrics", [])
+                        b_limits  = {
+                            "time_limit_s":    batch_rules.get("time_limit_s",    1.0),
+                            "memory_limit_mb": batch_rules.get("memory_limit_mb", 64),
+                        }
+
+                        b_results = {}
+                        if fp_info["compiled"]:
+                            for m in b_metrics:
+                                a_name = m["analyzer"]
+                                params = dict(m.get("params", {}))
+                                if a_name == "similarity_flag" and "submissions_dir" not in params:
+                                    params["submissions_dir"] = f"submissions/{batch_problem}/"
+                                b_results[a_name] = run_analyzer_safe(
+                                    a_name, src, bin_path, params, b_limits
+                                )
+
+                        rpt = generate_report(
+                            src, batch_problem, batch_rules, raw_fp, b_results
+                        )
+                        batch_results_rows.append({
+                            "File":     fname,
+                            "Grade":    f"{rpt['grade']:.1f} / 100",
+                            "Letter":   rpt["letter_grade"],
+                            "Compiled": "\u2713" if fp_info["compiled"] else "\u2717",
+                            "Flagged":  "\u2691 YES" if rpt.get("flags") else "\u2014",
+                        })
+                        batch_progress.progress((b_idx + 1) / len(batch_files))
+
+                    batch_status.empty()
+                    batch_progress.empty()
+                    st.success(
+                        f"Batch grading complete! {len(batch_files)} submission(s) graded."
+                    )
+                    st.dataframe(batch_results_rows, use_container_width=True)
+                    st.caption(f"Full reports saved to `reports/{batch_problem}/`.")
 
 # =========================================================
 # 2. STUDENT PORTAL
@@ -584,38 +919,50 @@ else:
         status.empty()
         progress.empty()
 
-        # Calculate Weighted Final Grade
-        total_score = 0.0
-        total_weight = 0.0
-        rows = []
+        # -------------------------------------------------------
+        # Generate persistent report via reporter.py
+        # -------------------------------------------------------
+        reporter_report = generate_report(
+            sub_filepath,
+            selected_problem,
+            active_rules,
+            raw_fp,
+            results,
+        )
 
+        # Calculate student-facing scorecard (EXCLUDE plagiarism from student view)
+        rows = []
         for m in metrics:
             m_name = m.get("name", m["analyzer"])
             a_name = m["analyzer"]
             w = float(m.get("weight", 0.0))
-            total_weight += w
+
+            # Never expose plagiarism or similarity checking to students
+            if a_name == "similarity_flag" or "plagiarism" in m_name.lower() or "originality" in m_name.lower():
+                continue
 
             res = results.get(a_name, {})
             s = float(res.get("score", 0.0))
-            total_score += s * w
+            fb = res.get("feedback", "")
+            if "Analyzer failures:" in fb:
+                fb = fb.split("Analyzer failures:")[0].strip()
 
             rows.append({
                 "Metric": m_name.upper(),
-                "Analyzer": a_name,
                 "Weight": f"{int(round(w * 100))}%",
-                "Raw Score": f"{s:.2f} / 1.00",
-                "Weighted": f"{(s * w * 100):.1f}%",
-                "Feedback": res.get("feedback", "")
+                "Score": f"{s * 10:.1f} / 10",
+                "Contribution": f"{(s * w * 100):.1f} pts",
+                "Summary": fb,
             })
 
-        final_grade = round((total_score / total_weight) * 100, 1) if total_weight > 0 else 0.0
+        final_grade = reporter_report.get("grade", 0.0)
 
         st.markdown("---")
         st.subheader("Assessment Scorecard")
 
         sc1, sc2 = st.columns([1, 3])
         with sc1:
-            st.metric("Final Score", f"{final_grade} / 100")
+            st.metric("Final Score", f"{final_grade:.1f} / 100")
             if final_grade >= 80:
                 st.success("Verdict: Excellent")
             elif final_grade >= 50:
@@ -626,11 +973,71 @@ else:
         with sc2:
             st.dataframe(rows, use_container_width=True)
 
-        with st.expander("📊 Detailed Analyzer Evidence & JSON Logs"):
+        # -------------------------------------------------------
+        # Meaningful, Short Suggestions to Improve Grade
+        # -------------------------------------------------------
+        suggestions = reporter_report.get("suggestions", [])
+        if suggestions:
+            st.markdown("### 💡 Suggestions to Improve Your Grade")
+            for tip in suggestions:
+                st.markdown(f"- {tip}")
+
+        # -------------------------------------------------------
+        # Counter-Examples (Where Student Failed)
+        # -------------------------------------------------------
+        failing_cases = []
+        for m in metrics:
+            a_name = m["analyzer"]
+            if a_name == "similarity_flag":
+                continue
+            ev = results.get(a_name, {}).get("evidence", {})
+            for fail in ev.get("failing", []):
+                failing_cases.append({"metric": m.get("name", a_name).upper(), **fail})
+
+        if failing_cases:
+            st.markdown("### ⚠️ Counter-Examples: Where Your Code Failed")
+            for i, fc in enumerate(failing_cases[:4], 1):
+                inp = str(fc.get("input", "")).strip()
+                exp = str(fc.get("expected", "")).strip()
+                got = str(fc.get("got", "")).strip()
+                why = fc.get("note", "")
+                with st.expander(f"Failed Case {i:02d} [{fc['metric']}]", expanded=True):
+                    c1, c2, c3 = st.columns(3)
+                    c1.text_area(f"Input #{i}", value=inp or "(empty)", height=70, disabled=True)
+                    c2.text_area(f"Expected #{i}", value=exp or "(empty)", height=70, disabled=True)
+                    c3.text_area(f"Your Output #{i}", value=got or "(no output / crash)", height=70, disabled=True)
+                    if why:
+                        st.caption(f"**Why it failed:** {why}")
+
+        # -------------------------------------------------------
+        # Detailed Diagnostics (Student view: excludes plagiarism)
+        # -------------------------------------------------------
+        with st.expander("🔍 View Technical Diagnostics & Feedback"):
             for m in metrics:
                 a_name = m["analyzer"]
+                if a_name == "similarity_flag" or "plagiarism" in m.get("name", "").lower() or "originality" in m.get("name", "").lower():
+                    continue
                 res = results.get(a_name, {})
-                st.markdown(f"#### `{a_name}`")
-                st.caption(f"Feedback: {res.get('feedback', '')}")
+                st.markdown(f"#### `{m.get('name', a_name).upper()}`")
+                fb_clean = res.get('feedback', '')
+                if "Analyzer failures:" in fb_clean:
+                    fb_clean = fb_clean.split("Analyzer failures:")[0].strip()
+                st.caption(f"Feedback: {fb_clean}")
                 st.json(res.get("evidence", {}))
                 st.markdown("---")
+
+        # -------------------------------------------------------
+        # Download Student Report
+        # -------------------------------------------------------
+        st.markdown("---")
+        st.subheader("Download Student Grading Report")
+        txt_path = reporter_report.get("_txt_path", "")
+        if txt_path and os.path.exists(txt_path):
+            with open(txt_path, "rb") as tf:
+                st.download_button(
+                    label="⬇ Download Student Feedback Report (.txt)",
+                    data=tf.read(),
+                    file_name=os.path.basename(txt_path),
+                    mime="text/plain",
+                    type="primary",
+                )
