@@ -1,0 +1,18 @@
+{
+  "generator": "sample-input-fuzzer",
+  "problem": "two_sum",
+  "oracle_compiled": false,
+  "count": 10,
+  "files": [
+    "gen_01.in",
+    "gen_02.in",
+    "gen_03.in",
+    "gen_04.in",
+    "gen_05.in",
+    "gen_06.in",
+    "gen_07.in",
+    "gen_08.in",
+    "gen_09.in",
+    "gen_10.in"
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "generator": "ollama-qwen3.5:2b",
+  "problem": "rotated_array",
+  "oracle_compiled": true,
+  "count": 5,
+  "files": [
+    "edge_01.in",
+    "edge_02.in",
+    "edge_03.in",
+    "edge_04.in",
+    "edge_05.in"
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "generator": "sample-input-fuzzer",
+  "problem": "max_subarray",
+  "oracle_compiled": true,
+  "count": 20,
+  "files": [
+    "gen_01.in",
+    "gen_02.in",
+    "gen_03.in",
+    "gen_04.in",
+    "gen_05.in",
+    "gen_06.in",
+    "gen_07.in",
+    "gen_08.in",
+    "gen_09.in",
+    "gen_10.in",
+    "gen_11.in",
+    "gen_12.in",
+    "gen_13.in",
+    "gen_14.in",
+    "gen_15.in",
+    "gen_16.in",
+    "gen_17.in",
+    "gen_18.in",
+    "gen_19.in",
+    "gen_20.in"
+  ]
+}

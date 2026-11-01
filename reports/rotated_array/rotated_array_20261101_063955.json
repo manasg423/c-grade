@@ -1,0 +1,401 @@
+{
+  "submission": "rotated_array_20261101_063955.c",
+  "submission_path": "submissions/rotated_array/rotated_array_20261101_063955.c",
+  "problem": "rotated_array",
+  "rules_hash": "sha256:e01b51d7d6e838f837e3352c6ed947733c37a87e616610b47484da63738261c8",
+  "generated_at": "2026-11-01T06:40:47.514942+00:00",
+  "grade": 92.5,
+  "letter_grade": "A",
+  "first_pass": {
+    "compiled": true,
+    "smoke_ok": true,
+    "suspected_infinite_loop": false,
+    "static_sanity": true,
+    "error": null
+  },
+  "metrics": [
+    {
+      "name": "correctness",
+      "analyzer": "io_tests",
+      "weight": 0.2,
+      "score": 1.0,
+      "contribution": 20.0,
+      "evidence": {
+        "tests_passed": 10,
+        "tests_total": 10,
+        "executed_tests": [
+          {
+            "test_file": "gen_01",
+            "input": "5 2\n1 2 3 4 5",
+            "expected": "4 5 1 2 3",
+            "got": "4 5 1 2 3",
+            "status": "PASSED",
+            "returncode": 0
+          },
+          {
+            "test_file": "gen_02",
+            "input": "3 1\n10 20 30",
+            "expected": "30 10 20",
+            "got": "30 10 20",
+            "status": "PASSED",
+            "returncode": 0
+          },
+          {
+            "test_file": "gen_03",
+            "input": "7 3\n1 2 3 4 5 6 7",
+            "expected": "5 6 7 1 2 3 4",
+            "got": "5 6 7 1 2 3 4",
+            "status": "PASSED",
+            "returncode": 0
+          },
+          {
+            "test_file": "gen_04",
+            "input": "10 5\n9 8 7 6 5 4 3 2 1 0",
+            "expected": "4 3 2 1 0 9 8 7 6 5",
+            "got": "4 3 2 1 0 9 8 7 6 5",
+            "status": "PASSED",
+            "returncode": 0
+          },
+          {
+            "test_file": "gen_05",
+            "input": "10 2\n1 2 3 4 5 6 7 8 9 10",
+            "expected": "9 10 1 2 3 4 5 6 7 8",
+            "got": "9 10 1 2 3 4 5 6 7 8",
+            "status": "PASSED",
+            "returncode": 0
+          },
+          {
+            "test_file": "gen_06",
+            "input": "5 2\n4 1 2 3 5",
+            "expected": "3 5 4 1 2",
+            "got": "3 5 4 1 2",
+            "status": "PASSED",
+            "returncode": 0
+          },
+          {
+            "test_file": "gen_07",
+            "input": "5 2\n1 4 5 3 2",
+            "expected": "3 2 1 4 5",
+            "got": "3 2 1 4 5",
+            "status": "PASSED",
+            "returncode": 0
+          },
+          {
+            "test_file": "gen_08",
+            "input": "5 2\n4 2 1 5 3",
+            "expected": "5 3 4 2 1",
+            "got": "5 3 4 2 1",
+            "status": "PASSED",
+            "returncode": 0
+          },
+          {
+            "test_file": "gen_09",
+            "input": "5 2\n3 5 2 4 1",
+            "expected": "4 1 3 5 2",
+            "got": "4 1 3 5 2",
+            "status": "PASSED",
+            "returncode": 0
+          },
+          {
+            "test_file": "gen_10",
+            "input": "5 2\n3 4 5 1 2",
+            "expected": "1 2 3 4 5",
+            "got": "1 2 3 4 5",
+            "status": "PASSED",
+            "returncode": 0
+          }
+        ],
+        "failing": []
+      },
+      "feedback": "Passed all 10/10 I/O test cases."
+    },
+    {
+      "name": "logical",
+      "analyzer": "edge_case_runner",
+      "weight": 0.1,
+      "score": 0.8,
+      "contribution": 8.0,
+      "evidence": {
+        "cases_passed": 4,
+        "cases_total": 5,
+        "cases": [
+          {
+            "case": "edge_01",
+            "input": "1 1\n1",
+            "expected": "1",
+            "got": "1",
+            "status": "PASSED",
+            "returncode": 0
+          },
+          {
+            "case": "edge_02",
+            "input": "2 2\n1 1",
+            "expected": "1 1",
+            "got": "1 1",
+            "status": "PASSED",
+            "returncode": 0
+          },
+          {
+            "case": "edge_03",
+            "input": "2 1\n1 2",
+            "expected": "2 1",
+            "got": "2 1",
+            "status": "PASSED",
+            "returncode": 0
+          },
+          {
+            "case": "edge_04",
+            "input": "2 -1\n1 2",
+            "expected": "2 1",
+            "got": "",
+            "status": "FAILED",
+            "returncode": -6,
+            "note": "Process crashed with returncode -6"
+          },
+          {
+            "case": "edge_05",
+            "input": "2 0\n1 2",
+            "expected": "1 2",
+            "got": "1 2",
+            "status": "PASSED",
+            "returncode": 0
+          }
+        ],
+        "failing": [
+          {
+            "case": "edge_04",
+            "input": "2 -1\n1 2",
+            "expected": "2 1",
+            "got": "",
+            "status": "FAILED",
+            "returncode": -6,
+            "note": "Process crashed with returncode -6"
+          }
+        ]
+      },
+      "feedback": "Failed 1/5 edge cases. Fails on input: 2 -1\n1 2 (Process crashed with returncode -6)."
+    },
+    {
+      "name": "memory_safety",
+      "analyzer": "sanitizer_run",
+      "weight": 0.1,
+      "score": 0.8,
+      "contribution": 8.0,
+      "evidence": {
+        "analysis_status": "inconclusive",
+        "tests_run": 1,
+        "test_names": [
+          "sample_input"
+        ],
+        "sanitizer_status": "clean",
+        "sanitizer_issues": [],
+        "valgrind_status": "inconclusive",
+        "valgrind_issues": [],
+        "issues": []
+      },
+      "feedback": "No confirmed memory issue was reported, but some checks were unavailable or inconclusive."
+    },
+    {
+      "name": "complexity",
+      "analyzer": "complexity_estimator",
+      "weight": 0.1,
+      "score": 1.0,
+      "contribution": 10.0,
+      "evidence": {
+        "input_type": "integer_array",
+        "profiling_method": "legacy_source_instrumentation",
+        "expected_complexity": "O(N)",
+        "detected_complexity": "O(N)",
+        "cost_growth_ratio": 8.44,
+        "input_growth_ratio": 9.0,
+        "trials": [
+          {
+            "n": 10,
+            "cost": 43,
+            "generated_input": "10\n35 7 93 66 62 48 53 5 18 21"
+          },
+          {
+            "n": 30,
+            "cost": 125,
+            "generated_input": "30\n10 77 95 24 45 90 70 80 48 40 95 92 88 77 17 90 89 44 30 49 19 82 4 89 29 59 2 58 9 99"
+          },
+          {
+            "n": 50,
+            "cost": 205,
+            "generated_input": "50\n54 67 73 71 72 76 35 87 98 13 73 67 61 21 10 74 86 81 44 8 6 4 83 82 22 75 21 78 79 21 94 53 62 96 87 100 22 92 16 87 20 60 9 56 47 53 5 35 22 89"
+          },
+          {
+            "n": 70,
+            "cost": 285,
+            "generated_input": "70\n62 86 75 80 39 90 60 54 97 85 21 47 29 68 59 4 50 77 31 94 59 60 34 45 25 30 94 78 87 89 22 96 58 67 45 53 79 52 33 3 9 9 87 29 40 51 83 12 75 2 9 32 33 85 72 62 1 34 84 56 67 22 38 71 56 19 68 85 80 13"
+          },
+          {
+            "n": 90,
+            "cost": 363,
+            "generated_input": "90\n53 20 53 8 22 6 40 16 100 70 4 32 58 34 26 58 22 85 74 52 32 89 85 99 64 80 69 80 72 48 49 76 43 26 89 9 71 6 78 46 87 68 86 12 76 20 46 9 37 33 46 17 82 6 96 62 30 100 14 59 17 26 76 75 8 41 45 49 10 11 92 47 85 77 89 11 35 61 100 18 52 82 84 85 20 27 18 20 98 77"
+          }
+        ]
+      },
+      "feedback": "Expected O(N) scaling is consistent with the measured growth (execution-cost proxy grew 8.44x over 9.00x input growth)."
+    },
+    {
+      "name": "static_analysis",
+      "analyzer": "static_analysis",
+      "weight": 0.1,
+      "score": 0.95,
+      "contribution": 9.5,
+      "evidence": {
+        "total_issues": 1,
+        "issues": [
+          {
+            "tool": "formatting",
+            "severity": "style",
+            "id": "poor_formatting",
+            "line": 0,
+            "message": "Poor formatting detected in 2 places.",
+            "penalty": 0.05
+          }
+        ],
+        "deductions_applied": 0.05,
+        "analyzer_failures": []
+      },
+      "feedback": "Detected 1 style issue(s). Issues: L0: Poor formatting detected in 2 places."
+    },
+    {
+      "name": "compiler_warnings",
+      "analyzer": "compiler_warnings",
+      "weight": 0.1,
+      "score": 1.0,
+      "contribution": 10.0,
+      "evidence": {
+        "total_issues": 0,
+        "issues": [],
+        "deductions_applied": 0.0,
+        "return_code": 0
+      },
+      "feedback": "No compiler warnings or errors detected."
+    },
+    {
+      "name": "modularity",
+      "analyzer": "function_split",
+      "weight": 0.1,
+      "score": 1.0,
+      "contribution": 10.0,
+      "evidence": {
+        "detected_functions": [
+          "swap",
+          "reverse",
+          "rotate",
+          "main"
+        ],
+        "helper_count": 3,
+        "helpers": [
+          "swap",
+          "reverse",
+          "rotate"
+        ],
+        "is_monolithic": false
+      },
+      "feedback": "Good modularity: Detected main() and 3 helper function(s) (swap, reverse, rotate)."
+    },
+    {
+      "name": "plagiarism_check",
+      "analyzer": "similarity_flag",
+      "weight": 0.1,
+      "score": 1.0,
+      "contribution": 10.0,
+      "evidence": {
+        "effective_similarity": 0.11,
+        "structural_match": 0.11,
+        "literal_match": 0.04,
+        "flag_threshold": 0.85,
+        "most_similar_file": "graph_color_20261031_120034.c",
+        "flagged": false,
+        "obfuscation_detected": false
+      },
+      "feedback": "Similarity 0.11 (Struct: 0.11, Lit: 0.04) against graph_color_20261031_120034.c. Not flagged."
+    },
+    {
+      "name": "readability",
+      "analyzer": "llm_review",
+      "weight": 0.1,
+      "score": 0.7,
+      "contribution": 7.0,
+      "evidence": {
+        "model": "qwen3.5:2b",
+        "temperature": 0,
+        "seed": 42,
+        "raw_response": {
+          "score": 7,
+          "reasons": [
+            "Variable names are mostly descriptive (e.g., 'data', 'k'), but some could be more specific for clarity.",
+            "The function `rotate` is named slightly ambiguously; while understandable in context, it might benefit from a clearer name like `rotateArray` or `circularShift`.",
+            "The variable `size` is used as both an array dimension and a loop counter without explicit declaration inside the function scope (though inferred from main), which is acceptable but could be more explicit.",
+            "The code lacks comments explaining the purpose of helper functions (`swap`, `reverse`) or the logic within `rotate`, reducing maintainability.",
+            "No input validation beyond basic checks exists for edge cases like negative numbers or non-integer inputs, though this is a logic/quality issue rather than pure readability.",
+            "The code structure is clean and follows standard C conventions with proper function separation."
+          ]
+        }
+      },
+      "feedback": "Variable names are mostly descriptive (e.g., 'data', 'k'), but some could be more specific for clarity.; The function `rotate` is named slightly ambiguously; while understandable in context, it might benefit from a clearer name like `rotateArray` or `circularShift`.; The variable `size` is used as both an array dimension and a loop counter without explicit declaration inside the function scope (though inferred from main), which is acceptable but could be more explicit.; The code lacks comments explaining the purpose of helper functions (`swap`, `reverse`) or the logic within `rotate`, reducing maintainability.; No input validation beyond basic checks exists for edge cases like negative numbers or non-integer inputs, though this is a logic/quality issue rather than pure readability.; The code structure is clean and follows standard C conventions with proper function separation."
+    }
+  ],
+  "suggestions": [
+    "Account for edge cases: test your code with zero, negative numbers, and boundary limits.",
+    "Fix memory safety issues: prevent out-of-bounds array access, initialize all pointers, and free allocated memory.",
+    "Improve readability: use descriptive variable names instead of single letters; add a brief comment above main() explaining the approach."
+  ],
+  "flags": [],
+  "usefulness_limitations": {
+    "usefulness": [
+      {
+        "use_case": "Automated grading for large university courses",
+        "example": "An instructor grades 400+ student C submissions in minutes with uniform, per-metric feedback instead of slow manual TA grading.",
+        "benefit": "Uniform, explainable feedback at scale."
+      },
+      {
+        "use_case": "Technical hiring and coding-interview screens",
+        "example": "A company evaluates 500 candidates on memory leaks (ASan), time complexity, and edge-case safety; every rejection is justified metric by metric.",
+        "benefit": "Objective, multi-dimensional first-round filtering."
+      },
+      {
+        "use_case": "Plagiarism and LLM-copy triage for instructors",
+        "example": "Two submissions reach a similarity of 0.93 against the 0.85 threshold; the agent flags only that pair, saving the instructor from reviewing all 300 files.",
+        "benefit": "Narrows manual review to a small set of suspicious cases."
+      },
+      {
+        "use_case": "Self-service debugging lab for students",
+        "example": "Students upload draft solutions to the Student Portal before the deadline and immediately see compiler warnings, memory bugs, and concrete counter-examples.",
+        "benefit": "Instant, actionable feedback without instructor involvement."
+      }
+    ],
+    "limitations": [
+      {
+        "limitation": "Tests cannot prove full correctness",
+        "example": "A submission passes all 10 hidden tests but fails when the input has extra whitespace or a trailing newline that no test covers. The agent still reports 10/10.",
+        "mitigation": "The agent auto-generates extra adversarial inputs via the LLM and compares student output against a reference oracle.c."
+      },
+      {
+        "limitation": "Complexity estimator requires Linux perf or clang coverage",
+        "example": "On a Windows host, perf is unavailable; the SanitizerCoverage fallback needs clang. An O(N^2) bubble-sort may be misclassified if both tools are absent.",
+        "mitigation": "Install WSL2 with perf, or use the clang fallback pipeline."
+      },
+      {
+        "limitation": "Plagiarism detector can be fooled by deep refactoring",
+        "example": "A student copies code but renames every identifier and reorders all functions; the k-gram structural similarity may drop below 0.85 and escape detection.",
+        "mitigation": "Lower the threshold in rules.json or enable AST-level diffing with lizard's call-graph comparison."
+      },
+      {
+        "limitation": "LLM readability score depends on the local Ollama server",
+        "example": "If Ollama is not running, the agent falls back to a heuristic that cannot detect semantic naming issues like calling a variable 'tmp' where 'carry' is intended.",
+        "mitigation": "The deterministic heuristic fallback keeps the pipeline live."
+      }
+    ]
+  },
+  "tool_versions": {
+    "gcc": "gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+    "cppcheck": "Cppcheck 2.13.0",
+    "python": "3.12.3",
+    "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.39"
+  }
+}
