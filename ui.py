@@ -22,13 +22,12 @@ st.set_page_config(
     layout="wide"
 )
 
-# Ensure base directories exist
-for d in ("rules", "submissions", "tests", "reports"):
-    os.makedirs(d, exist_ok=True)
+# Ensure base problems directory exists
+os.makedirs("problems", exist_ok=True)
 
 
 def list_available_problems() -> list[str]:
-    rule_files = glob.glob("rules/*_rules.json")
+    rule_files = glob.glob("problems/*/*_rules.json")
     problems = []
     for f in rule_files:
         base = os.path.basename(f)
@@ -39,13 +38,14 @@ def list_available_problems() -> list[str]:
 
 def sync_problem_directories():
     """
-    Ensures every existing problem in rules/ (plus default 'add' and 'str')
-    has its own dedicated subfolder in both submissions/ and tests/.
+    Ensures every existing problem has its own dedicated 
+    submissions, tests, and reports subfolders.
     """
     problems = set(list_available_problems()) | {"add", "str"}
     for prob in problems:
-        os.makedirs(os.path.join("submissions", prob), exist_ok=True)
-        os.makedirs(os.path.join("tests", prob), exist_ok=True)
+        prob_base = os.path.join("problems", prob)
+        for sub in ("submissions", "tests", "reports"):
+            os.makedirs(os.path.join(prob_base, sub), exist_ok=True)
 
 
 sync_problem_directories()
@@ -55,10 +55,6 @@ sync_problem_directories()
 # Helper: Dynamic Parser for run_first_pass() Output
 # ---------------------------------------------------------
 def _parse_first_pass(fp: dict, source_path: str) -> dict:
-    """
-    Dynamically extracts status fields from the dictionary returned by
-    core.first_pass.run_first_pass() without relying on fragile hardcoded key names.
-    """
     flat = {}
     if isinstance(fp, dict):
         for k, v in fp.items():
@@ -101,7 +97,6 @@ def _parse_first_pass(fp: dict, source_path: str) -> dict:
 
     note = _find_val(["note", "reason", "error", "stderr", "msg", "message"], default="")
 
-    # Locate compiled binary path from dictionary values
     binary_path = ""
     for k, v in flat.items():
         if isinstance(v, str) and any(b in k for b in ["bin", "exe", "out", "path"]):
@@ -115,7 +110,6 @@ def _parse_first_pass(fp: dict, source_path: str) -> dict:
                 binary_path = v
                 break
 
-    # Guaranteed GCC verification/fallback if binary_path wasn't returned
     compile_stderr = ""
     if not binary_path or not os.path.exists(binary_path):
         tmp_bin = os.path.join(tempfile.gettempdir(), f"cgrade_{os.path.basename(source_path)}.out")
@@ -191,10 +185,6 @@ def run_analyzer_safe(analyzer_name: str, source_path: str, binary_path: str, pa
 
 
 def ensure_valid_rules_weights(rule_path: str) -> dict:
-    """
-    Loads rules JSON and guarantees metric weights sum to strictly 1.00
-    so the gatekeeper never rejects due to floating-point drift.
-    """
     with open(rule_path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
@@ -239,7 +229,7 @@ if role == "👨‍🏫 Teacher Portal":
         st.subheader("Configure New Problem")
         st.caption(
             "Enter the problem details below. The system automatically creates dedicated folders in "
-            "`submissions/<problem>/` and `tests/<problem>/`, saves `oracle.c`, and builds `rules/<problem>_rules.json`."
+            "`problems/<problem>/{submissions, tests, reports}` and builds `problems/<problem>/<problem>_rules.json`."
         )
 
         col1, col2 = st.columns(2)
@@ -256,7 +246,7 @@ if role == "👨‍🏫 Teacher Portal":
             )
             expected_complexity = st.selectbox(
                 "Expected Asymptotic Complexity:",
-                ["O(1)","O(log N)", "O(N)", "O(N log N)", "O(N^2)","O(N^3)"]
+                ["O(1)", "O(log N)", "O(N)", "O(N log N)", "O(N^2)", "O(N^3)"]
             )
             auto_gen_count = st.slider("Auto-Generated I/O Test Cases:", min_value=1, max_value=20, value=5)
 
@@ -292,11 +282,13 @@ if role == "👨‍🏫 Teacher Portal":
             if not problem_id:
                 st.error("Please enter a valid Problem Slug.")
             else:
-                # Create dedicated problem directories in both tests/ and submissions/
-                prob_test_dir = os.path.join("tests", problem_id)
-                prob_sub_dir = os.path.join("submissions", problem_id)
-                os.makedirs(prob_test_dir, exist_ok=True)
-                os.makedirs(prob_sub_dir, exist_ok=True)
+                prob_base_dir = os.path.join("problems", problem_id)
+                prob_test_dir = os.path.join(prob_base_dir, "tests")
+                prob_sub_dir = os.path.join(prob_base_dir, "submissions")
+                prob_rep_dir = os.path.join(prob_base_dir, "reports")
+                
+                for d in (prob_test_dir, prob_sub_dir, prob_rep_dir):
+                    os.makedirs(d, exist_ok=True)
 
                 oracle_path = os.path.join(prob_test_dir, "oracle.c")
                 with open(oracle_path, "w", encoding="utf-8") as f:
@@ -309,8 +301,8 @@ if role == "👨‍🏫 Teacher Portal":
                         "analyzer": "io_tests",
                         "raw_weight": 0.20,
                         "params": {
-                            "testset_dir": f"tests/{problem_id}/",
-                            "oracle_path": f"tests/{problem_id}/oracle.c",
+                            "testset_dir": f"problems/{problem_id}/tests/",
+                            "oracle_path": f"problems/{problem_id}/tests/oracle.c",
                             "auto_generate": True,
                             "num_generated_tests": int(auto_gen_count),
                             "seed": 42
@@ -322,9 +314,8 @@ if role == "👨‍🏫 Teacher Portal":
                         "analyzer": "edge_case_runner",
                         "raw_weight": 0.10,
                         "params": {
-                            "oracle_path": f"tests/{problem_id}/oracle.c",
+                            "oracle_path": f"problems/{problem_id}/tests/oracle.c",
                             "cases": ["empty", "whitespace"],
-                            "test_inputs": [sample_input, "0", "-1"], # not used anymore
                             "seed": 42
                         }
                     })
@@ -379,7 +370,7 @@ if role == "👨‍🏫 Teacher Portal":
                         "name": "plagiarism_check",
                         "analyzer": "similarity_flag",
                         "raw_weight": 0.10,
-                        "params": {"submissions_dir": f"submissions/{problem_id}/"}
+                        "params": {"submissions_dir": f"problems/{problem_id}/submissions/"}
                     })
                 if use_llm:
                     raw_metrics.append({
@@ -420,11 +411,10 @@ if role == "👨‍🏫 Teacher Portal":
                         "metrics": final_metrics
                     }
 
-                    rule_file = os.path.join("rules", f"{problem_id}_rules.json")
+                    rule_file = os.path.join(prob_base_dir, f"{problem_id}_rules.json")
                     with open(rule_file, "w", encoding="utf-8") as rf:
                         json.dump(rules_obj, rf, indent=2)
 
-                    # Generate I/O test cases and Edge cases ahead of time
                     with st.spinner("Generating I/O and Edge Test Cases using Oracle & LLM..."):
                         try:
                             gen_res = generate_all_test_cases(
@@ -441,8 +431,7 @@ if role == "👨‍🏫 Teacher Portal":
 
                     st.success(
                         f"Deployed '{problem_id}'!\n"
-                        f"- Created Submissions Folder: `{prob_sub_dir}/`\n"
-                        f"- Created Tests Folder: `{prob_test_dir}/`\n"
+                        f"- Created Directory Structure: `{prob_base_dir}/`\n"
                         f"{test_summary}\n"
                         f"- Saved Rules: `{rule_file}`"
                     )
@@ -454,19 +443,17 @@ if role == "👨‍🏫 Teacher Portal":
             st.info("No rules found.")
         else:
             sel = st.selectbox("Select Problem:", probs, key="inspect_prob")
-            r_path = os.path.join("rules", f"{sel}_rules.json")
-            prob_tests_dir = os.path.join("tests", sel)
+            r_path = os.path.join("problems", sel, f"{sel}_rules.json")
+            prob_tests_dir = os.path.join("problems", sel, "tests")
             auto_dir = os.path.join(prob_tests_dir, "auto_generated")
             edge_dir = os.path.join(prob_tests_dir, "edge_cases")
 
-            # Load existing rules
             try:
                 with open(r_path, "r", encoding="utf-8") as f:
                     rules_data = json.load(f)
             except Exception:
                 rules_data = {}
 
-            # Find current test counts from rules and disk
             cur_io_in_files = sorted(glob.glob(os.path.join(auto_dir, "gen_*.in")))
             if not cur_io_in_files:
                 cur_io_in_files = sorted(glob.glob(os.path.join(prob_tests_dir, "*.in")))
@@ -479,9 +466,6 @@ if role == "👨‍🏫 Teacher Portal":
                     break
             rule_edge_count = len(cur_edge_in_files) or 5
 
-            # -----------------------------------------------------
-            # Editable Rules & Configuration Section
-            # -----------------------------------------------------
             st.markdown("### ⚙️ Edit Problem Rules & Test Configuration")
             st.caption(
                 "Modify parameters, test case counts, or metrics below. "
@@ -547,25 +531,21 @@ if role == "👨‍🏫 Teacher Portal":
                     parsed_rules["memory_limit_mb"] = int(e_mem)
                     parsed_rules["smoke_input"] = str(e_smoke)
 
-                    # Update num_generated_tests inside io_tests metric params
                     for m in parsed_rules.get("metrics", []):
                         if m.get("analyzer") == "io_tests":
                             if "params" not in m:
                                 m["params"] = {}
                             m["params"]["num_generated_tests"] = int(e_io_count)
 
-                    # Validate total weight
                     tot_w = sum(m.get("weight", 0.0) for m in parsed_rules.get("metrics", []))
                     if abs(tot_w - 1.0) > 1e-4:
                         st.warning(f"Note: Metric weights sum to {tot_w:.2f} (expected 1.00). Normalizing...")
                         for m in parsed_rules.get("metrics", []):
                             m["weight"] = round(m.get("weight", 0.0) / tot_w, 2)
 
-                    # Write back to rules JSON
                     with open(r_path, "w", encoding="utf-8") as rf:
                         json.dump(parsed_rules, rf, indent=2)
 
-                    # Automatically regenerate test cases with updated counts
                     oracle_file = os.path.join(prob_tests_dir, "oracle.c")
                     with st.spinner(f"Regenerating {e_io_count} I/O tests & {e_edge_count} edge cases for {sel}..."):
                         res = generate_all_test_cases(
@@ -589,7 +569,6 @@ if role == "👨‍🏫 Teacher Portal":
 
             tc_col1, tc_col2 = st.columns(2)
 
-            # I/O Test Cases Column
             with tc_col1:
                 st.markdown("#### 📥 Standard I/O Test Cases")
                 io_in_files = sorted(glob.glob(os.path.join(auto_dir, "gen_*.in")))
@@ -619,7 +598,6 @@ if role == "👨‍🏫 Teacher Portal":
                                 else:
                                     st.caption("*(No .out file)*")
 
-            # Edge Cases Column
             with tc_col2:
                 st.markdown("#### ⚡ Adversarial Edge Cases")
                 edge_in_files = sorted(glob.glob(os.path.join(edge_dir, "edge_*.in")))
@@ -646,58 +624,11 @@ if role == "👨‍🏫 Teacher Portal":
                                 else:
                                     st.caption("*(No .out file)*")
 
-            # Regeneration Controls
-            # st.markdown("---")
-            # st.subheader("🔄 Quick Regenerate Test Cases")
-            # st.caption("Synthesize a fresh set of I/O test cases and edge cases (.in / .out) and synchronize rules.json.")
-
-            # rg1, rg2 = st.columns(2)
-            # with rg1:
-            #     cur_io = max(5, len(io_in_files) if io_in_files else 5)
-            #     regen_io = st.slider("Number of I/O Test Cases:", min_value=1, max_value=20, value=min(20, cur_io), key="regen_io")
-            # with rg2:
-            #     cur_edge = max(5, len(edge_in_files) if edge_in_files else 5)
-            #     regen_edge = st.slider("Number of Edge Cases:", min_value=1, max_value=15, value=min(15, cur_edge), key="regen_edge")
-
-            # if st.button("🔄 Regenerate Test Cases Now", type="primary", key="regen_btn"):
-            #     oracle_file = os.path.join(prob_tests_dir, "oracle.c")
-            #     with st.spinner(f"Regenerating test cases for {sel} via test_case_generator.py..."):
-            #         try:
-            #             # Also update rules.json with new test count
-            #             try:
-            #                 with open(r_path, "r", encoding="utf-8") as rf:
-            #                     r_json = json.load(rf)
-            #                 for m in r_json.get("metrics", []):
-            #                     if m.get("analyzer") == "io_tests":
-            #                         if "params" not in m:
-            #                             m["params"] = {}
-            #                         m["params"]["num_generated_tests"] = int(regen_io)
-            #                 with open(r_path, "w", encoding="utf-8") as rf:
-            #                     json.dump(r_json, rf, indent=2)
-            #             except Exception:
-            #                 pass
-
-            #             res = generate_all_test_cases(
-            #                 sel,
-            #                 tests_dir=prob_tests_dir,
-            #                 oracle_path=oracle_file,
-            #                 sample_input=rules_data.get("smoke_input", ""),
-            #                 num_io=int(regen_io),
-            #                 num_edge=int(regen_edge),
-            #                 force_regenerate=True
-            #             )
-            #             st.success(f"Regenerated {res['io_count']} I/O test cases and {res['edge_count']} edge cases with matching .out files!")
-            #             st.rerun()
-            #         except Exception as exc:
-            #             st.error(f"Regeneration failed: {exc}")
-
-
-
     with teacher_tab3:
         st.subheader("Batch Grade \u2014 Grade All Submissions for a Problem")
         st.caption(
             "Select a problem and click **Run Batch Grade** to evaluate every `.c` file "
-            "in `submissions/<problem>/` automatically. Reports are saved to `reports/<problem>/`."
+            "in `problems/<problem>/submissions/` automatically. Reports are saved to `problems/<problem>/reports/`."
         )
 
         probs_batch = list_available_problems()
@@ -705,8 +636,8 @@ if role == "👨‍🏫 Teacher Portal":
             st.info("No assignments found. Create one in the 'Create / Update Assignment' tab.")
         else:
             batch_problem    = st.selectbox("Problem to batch-grade:", probs_batch, key="batch_prob")
-            batch_rules_path = os.path.join("rules", f"{batch_problem}_rules.json")
-            batch_sub_dir    = os.path.join("submissions", batch_problem)
+            batch_rules_path = os.path.join("problems", batch_problem, f"{batch_problem}_rules.json")
+            batch_sub_dir    = os.path.join("problems", batch_problem, "submissions")
             batch_files      = sorted(glob.glob(os.path.join(batch_sub_dir, "*.c")))
 
             if batch_files:
@@ -725,9 +656,7 @@ if role == "👨‍🏫 Teacher Portal":
 
                     for b_idx, src in enumerate(batch_files):
                         fname = os.path.basename(src)
-                        batch_status.text(
-                            f"Grading {fname}  ({b_idx + 1}/{len(batch_files)}) \u2026"
-                        )
+                        batch_status.text(f"Grading {fname} ({b_idx + 1}/{len(batch_files)}) \u2026")
 
                         smoke_val = batch_rules.get("smoke_input", "7 5\n")
                         try:
@@ -749,14 +678,10 @@ if role == "👨‍🏫 Teacher Portal":
                                 a_name = m["analyzer"]
                                 params = dict(m.get("params", {}))
                                 if a_name == "similarity_flag" and "submissions_dir" not in params:
-                                    params["submissions_dir"] = f"submissions/{batch_problem}/"
-                                b_results[a_name] = run_analyzer_safe(
-                                    a_name, src, bin_path, params, b_limits
-                                )
+                                    params["submissions_dir"] = f"problems/{batch_problem}/submissions/"
+                                b_results[a_name] = run_analyzer_safe(a_name, src, bin_path, params, b_limits)
 
-                        rpt = generate_report(
-                            src, batch_problem, batch_rules, raw_fp, b_results
-                        )
+                        rpt = generate_report(src, batch_problem, batch_rules, raw_fp, b_results)
                         batch_results_rows.append({
                             "File":     fname,
                             "Grade":    f"{rpt['grade']:.1f} / 100",
@@ -768,11 +693,10 @@ if role == "👨‍🏫 Teacher Portal":
 
                     batch_status.empty()
                     batch_progress.empty()
-                    st.success(
-                        f"Batch grading complete! {len(batch_files)} submission(s) graded."
-                    )
+                    st.success(f"Batch grading complete! {len(batch_files)} submission(s) graded.")
                     st.dataframe(batch_results_rows, use_container_width=True)
-                    st.caption(f"Full reports saved to `reports/{batch_problem}/`.")
+                    st.caption(f"Full reports saved to `problems/{batch_problem}/reports/`.")
+
 
 # =========================================================
 # 2. STUDENT PORTAL
@@ -783,20 +707,20 @@ else:
 
     available_problems = list_available_problems()
     if not available_problems:
-        st.warning("No assignments found in 'rules/'. Use the Teacher Portal to create one.")
+        st.warning("No assignments found in 'problems/'. Use the Teacher Portal to create one.")
         st.stop()
 
     col_sel, col_lim1, col_lim2 = st.columns([2, 1, 1])
     with col_sel:
         selected_problem = st.selectbox("Select Assignment:", available_problems)
 
-    # Ensure problem-specific submission & test folders exist
-    prob_sub_dir = os.path.join("submissions", selected_problem)
-    prob_test_dir = os.path.join("tests", selected_problem)
+    prob_base_dir = os.path.join("problems", selected_problem)
+    prob_sub_dir = os.path.join(prob_base_dir, "submissions")
+    prob_test_dir = os.path.join(prob_base_dir, "tests")
     os.makedirs(prob_sub_dir, exist_ok=True)
     os.makedirs(prob_test_dir, exist_ok=True)
 
-    rule_path = os.path.join("rules", f"{selected_problem}_rules.json")
+    rule_path = os.path.join(prob_base_dir, f"{selected_problem}_rules.json")
     active_rules = ensure_valid_rules_weights(rule_path)
 
     with col_lim1:
@@ -806,11 +730,7 @@ else:
 
     st.caption(f"📁 Submissions for this problem are stored in: `{prob_sub_dir}/`")
 
-    upload_mode = st.radio(
-        "Submission Method:",
-        ["Paste Code Directly", "Upload .c File"],
-        horizontal=True
-    )
+    upload_mode = st.radio("Submission Method:", ["Paste Code Directly", "Upload .c File"], horizontal=True)
 
     code_to_grade = ""
     existing_sub_path = None
@@ -852,7 +772,6 @@ else:
             st.error("Submission cannot be empty.")
             st.stop()
 
-        # Save directly into submissions/<selected_problem>/
         if existing_sub_path:
             sub_filepath = existing_sub_path
         else:
@@ -868,10 +787,8 @@ else:
 
         st.info(f"Saved / Using submission in problem folder: `{sub_filepath}`")
 
-        # Dynamically fetch the smoke_input from deployed rules, fallback to "7 5\n"
         smoke_input_val = active_rules.get("smoke_input", "7 5\n")
 
-        # Run Gatekeeper First Pass
         with st.spinner("Running Phase 1 Gatekeeper & Compilation..."):
             try:
                 raw_fp = run_first_pass(sub_filepath, rule_path, smoke_input_val)
@@ -894,7 +811,6 @@ else:
                 st.code(fp_info["note"], language="text")
             st.stop()
 
-        # Run Specialist Analyzers
         binary_path = fp_info["binary_path"]
         metrics = active_rules.get("metrics", [])
         limits = {
@@ -910,18 +826,14 @@ else:
             a_name = m["analyzer"]
             status.text(f"Running specialist analyzer ({idx + 1}/{len(metrics)}): {a_name}...")
             params = dict(m.get("params", {}))
-            # Ensure similarity_flag always points to this problem's submission subfolder
             if a_name == "similarity_flag" and "submissions_dir" not in params:
-                params["submissions_dir"] = f"submissions/{selected_problem}/"
+                params["submissions_dir"] = f"problems/{selected_problem}/submissions/"
             results[a_name] = run_analyzer_safe(a_name, sub_filepath, binary_path, params, limits)
             progress.progress((idx + 1) / max(1, len(metrics)))
 
         status.empty()
         progress.empty()
 
-        # -------------------------------------------------------
-        # Generate persistent report via reporter.py
-        # -------------------------------------------------------
         reporter_report = generate_report(
             sub_filepath,
             selected_problem,
@@ -930,14 +842,12 @@ else:
             results,
         )
 
-        # Calculate student-facing scorecard (EXCLUDE plagiarism from student view)
         rows = []
         for m in metrics:
             m_name = m.get("name", m["analyzer"])
             a_name = m["analyzer"]
             w = float(m.get("weight", 0.0))
 
-            # Never expose plagiarism or similarity checking to students
             if a_name == "similarity_flag" or "plagiarism" in m_name.lower() or "originality" in m_name.lower():
                 continue
 
@@ -973,18 +883,12 @@ else:
         with sc2:
             st.dataframe(rows, use_container_width=True)
 
-        # -------------------------------------------------------
-        # Meaningful, Short Suggestions to Improve Grade
-        # -------------------------------------------------------
         suggestions = reporter_report.get("suggestions", [])
         if suggestions:
             st.markdown("### 💡 Suggestions to Improve Your Grade")
             for tip in suggestions:
                 st.markdown(f"- {tip}")
 
-        # -------------------------------------------------------
-        # Counter-Examples (Where Student Failed)
-        # -------------------------------------------------------
         failing_cases = []
         for m in metrics:
             a_name = m["analyzer"]
@@ -1009,9 +913,6 @@ else:
                     if why:
                         st.caption(f"**Why it failed:** {why}")
 
-        # -------------------------------------------------------
-        # Detailed Diagnostics (Student view: excludes plagiarism)
-        # -------------------------------------------------------
         with st.expander("🔍 View Technical Diagnostics & Feedback"):
             for m in metrics:
                 a_name = m["analyzer"]
@@ -1026,9 +927,6 @@ else:
                 st.json(res.get("evidence", {}))
                 st.markdown("---")
 
-        # -------------------------------------------------------
-        # Download Student Report
-        # -------------------------------------------------------
         st.markdown("---")
         st.subheader("Download Student Grading Report")
         txt_path = reporter_report.get("_txt_path", "")
