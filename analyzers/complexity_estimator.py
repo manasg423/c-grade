@@ -132,15 +132,12 @@ def _auto_detect_input_type(source_path: str, configured_type: Optional[str]) ->
 
     try:
         with open(source_path, "r", encoding="utf-8", errors="ignore") as f:
-            # For detection, strip comments only after protecting quoted strings.
             code = f.read()
         code = _strip_comments(code)
 
-        # String-like input commonly uses %s, %c, fgets/gets/getchar, or getline.
         if re.search(r"%\d*s|%s|\bfgets\s*\(|\bgets\s*\(|\bgetline\s*\(|\bgetchar\s*\(|%c", code):
             return "string"
 
-        # An input read inside a loop is a useful, but not conclusive, array clue.
         if re.search(r"\b(for|while)\b[^{}]*\{[^}]*\bscanf\s*\(", code, flags=re.DOTALL):
             return "integer_array"
 
@@ -156,17 +153,15 @@ def _auto_detect_input_type(source_path: str, configured_type: Optional[str]) ->
     except Exception:
         pass
 
-    # Keep the historical default when the source does not provide enough clues.
     return "string"
 
 
-def _get_trial_sizes(input_type: str, trials: int) -> list[int]:
+def _get_trial_sizes(input_type: str, trials: int, expected_complexity: str = "O(N)") -> list[int]:
     trials = max(2, int(trials))
     if input_type == "single_number":
         primes = [13, 127, 1009, 10007, 104729, 250007, 500009]
         if trials <= len(primes):
             return primes[:trials]
-        # Extend with larger values while retaining the same monotonic input family.
         sizes = list(primes)
         candidate = primes[-1] + 2
         while len(sizes) < trials:
@@ -181,11 +176,25 @@ def _get_trial_sizes(input_type: str, trials: int) -> list[int]:
             candidate += 2
         return sizes
 
-    # Keep within a range that is reasonably safe for common fixed-size C buffers.
+    if input_type == "fixed_arithmetic":
+        if "log" in expected_complexity.lower():
+            # For logarithmic algorithms on numbers (e.g. Euclidean GCD/LCM),
+            # trial sizes must scale exponentially so that O(log N) costs scale linearly.
+            # Fibonacci numbers are mathematically canonical (Lame's Theorem):
+            fibs = [13, 55, 233, 987, 4181, 17711, 75025, 317811]
+            if trials <= len(fibs):
+                return fibs[:trials]
+            sizes = list(fibs)
+            phi = 1.6180339887
+            while len(sizes) < trials:
+                sizes.append(int(round(sizes[-1] * phi * phi)))
+            return sizes
+        return [10 + i * 20 for i in range(trials)]
+
     return [10 + i * 20 for i in range(trials)]
 
 
-def _generate_scaled_input(input_type: str, n: int, seed: int = 42) -> str:
+def _generate_scaled_input(input_type: str, n: int, seed: int = 42, expected_complexity: str = "O(N)") -> str:
     rng = random.Random(seed + n)
 
     if input_type == "string":
@@ -204,6 +213,26 @@ def _generate_scaled_input(input_type: str, n: int, seed: int = 42) -> str:
         return f"{n}\n"
 
     if input_type == "fixed_arithmetic":
+        if "log" in expected_complexity.lower():
+            # For logarithmic arithmetic (GCD, LCM, modular operations, binary pow),
+            # consecutive Fibonacci numbers (F_{k+1}, F_k) force logarithmic step counts (Lame's Theorem).
+            fib_pairs = {
+                13: (21, 13),
+                55: (89, 55),
+                233: (377, 233),
+                987: (1597, 987),
+                4181: (6765, 4181),
+                17711: (28657, 17711),
+                75025: (121393, 75025),
+                317811: (514229, 317811),
+            }
+            if n in fib_pairs:
+                a, b = fib_pairs[n]
+                return f"{a} {b}\n"
+            phi = 1.6180339887
+            companion = max(1, int(round(n * phi)))
+            return f"{companion} {n}\n"
+
         return f"{n} {n + 7}\n"
 
     chars = [chr(rng.randint(97, 122)) for _ in range(n)]
@@ -211,11 +240,7 @@ def _generate_scaled_input(input_type: str, n: int, seed: int = 42) -> str:
 
 
 def _clang_instrumented_source(raw_code: str) -> str:
-    """Prepare source for Clang SanitizerCoverage edge counting.
-
-    Also redirect direct strlen(...) calls to an instrumented equivalent, because
-    the platform C library itself is usually not compiled with our coverage hooks.
-    """
+    """Prepare source for Clang SanitizerCoverage edge counting."""
     code = _replace_c_function_calls(raw_code, {"strlen": "__cg_strlen"})
 
     prefix = r'''#include <stdint.h>
@@ -254,7 +279,6 @@ static size_t __cg_strlen(const char *s) {
         __cg_steps++;
         ++p;
     }
-    /* Count inspection of the terminating NUL as one additional character read. */
     __cg_steps++;
     return (size_t)(p - s);
 }
@@ -281,7 +305,6 @@ static size_t __cg_strlen(const char *s) {
 }
 '''
 
-    # Best-effort wrapping for simple loops with a single statement body.
     code = re.sub(
         r"\bwhile\s*\(([^)]+)\)\s*([^;{]+;)",
         r"while (\1) { \2 }",
@@ -320,6 +343,7 @@ def _profile_exact_steps(
     sizes: list[int],
     seed: int,
     timeout: float,
+    expected_complexity: str = "O(N)",
 ) -> tuple[Optional[list[dict]], Optional[str]]:
     """Return per-input execution-cost proxies and the measurement method."""
     if not source_path or not os.path.exists(source_path):
@@ -364,7 +388,6 @@ def _profile_exact_steps(
         else:
             comp = None
 
-        # If Clang is unavailable or rejects the source/extensions, try the older GCC path.
         if not compiler or comp is None or comp.returncode != 0 or not os.path.exists(inst_bin):
             compiler = shutil.which("gcc")
             if not compiler:
@@ -383,7 +406,7 @@ def _profile_exact_steps(
 
         measurements = []
         for n in sizes:
-            inp = _generate_scaled_input(input_type, n, seed)
+            inp = _generate_scaled_input(input_type, n, seed, expected_complexity)
             steps = _run_profiled_program(inst_bin, inp, timeout)
             if steps is None:
                 return None, None
@@ -416,11 +439,10 @@ def _profile_exact_steps(
 
 
 def _run_with_timing(binary_path: str, stdin_data: str, timeout: float) -> int:
-    """Timing fallback. Process-startup cost can obscure tiny algorithmic work."""
+    """Timing fallback."""
     import time
 
     samples = []
-    # A few repetitions reduce (but do not eliminate) timer noise.
     for _ in range(3):
         start = time.perf_counter_ns()
         try:
@@ -494,7 +516,6 @@ def _detect_complexity(measurements: list[dict]) -> str:
     errors = {name: _fit_model_error(ns, costs, name) for name in candidates}
     best_error = min(errors.values())
 
-    # Prefer a simpler class when its fit is practically indistinguishable.
     tolerance = 0.035
     for candidate in candidates:
         if errors[candidate] <= best_error + tolerance:
@@ -503,12 +524,7 @@ def _detect_complexity(measurements: list[dict]) -> str:
 
 
 def evaluate(source_path: str, binary_path: str, params: dict, limits: dict = None) -> dict:
-    """Estimate asymptotic complexity while preserving the original API/schema.
-
-    Required external input/output shape remains:
-      evaluate(source_path, binary_path, params, limits=None) ->
-        {"score": float, "evidence": {...}, "feedback": str}
-    """
+    """Estimate asymptotic complexity while preserving the original API/schema."""
     if limits is None:
         limits = {}
 
@@ -519,24 +535,40 @@ def evaluate(source_path: str, binary_path: str, params: dict, limits: dict = No
             "feedback": "Evaluation failed: missing files.",
         }
 
-    # No configured input_type means "auto"; explicit valid values still win.
     configured_type = params.get("input_type")
     input_type = _auto_detect_input_type(source_path, configured_type)
-    expected_complexity = params.get("expected_complexity", "O(N)")
+
+    expected_complexity = str(params.get("expected_complexity", "O(N)")).strip()
+    norm_exp = expected_complexity.upper().replace(" ", "")
+    if norm_exp in ("O(LOGN)", "O(LOG(N))", "O(LOG)"):
+        expected_complexity = "O(log N)"
+    elif norm_exp in ("O(NLOGN)", "O(NLOG(N))"):
+        expected_complexity = "O(N log N)"
+    elif norm_exp == "O(1)":
+        expected_complexity = "O(1)"
+    elif norm_exp in ("O(N^2)", "O(N2)"):
+        expected_complexity = "O(N^2)"
+    elif norm_exp in ("O(N^3)", "O(N3)"):
+        expected_complexity = "O(N^3)"
+    elif norm_exp == "O(N)":
+        expected_complexity = "O(N)"
+
     trials = int(params.get("trials", 5))
     seed = int(params.get("seed", 42))
     timeout = float(limits.get("time_limit_s", 2.0))
 
-    sizes = _get_trial_sizes(input_type, trials)
+    sizes = _get_trial_sizes(input_type, trials, expected_complexity)
 
-    measurements, mode = _profile_exact_steps(source_path, input_type, sizes, seed, timeout)
+    measurements, mode = _profile_exact_steps(
+        source_path, input_type, sizes, seed, timeout, expected_complexity
+    )
 
     if not measurements:
         mode = "time_ns_fallback"
         measurements = []
         if os.path.exists(binary_path):
             for n in sizes:
-                inp = _generate_scaled_input(input_type, n, seed)
+                inp = _generate_scaled_input(input_type, n, seed, expected_complexity)
                 measurements.append(
                     {
                         "n": n,

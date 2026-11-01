@@ -2,6 +2,7 @@ import os
 import json
 import hashlib
 import subprocess
+import tempfile
 from core.sandbox import run_safe
 
 def run_first_pass(source_path: str, rules_path: str, smoke_input: str = "7 5\n") -> dict:
@@ -50,7 +51,8 @@ def run_first_pass(source_path: str, rules_path: str, smoke_input: str = "7 5\n"
     result["static_sanity"] = True
 
     # 3. Sandbox Compilation Check
-    binary_dir = "/tmp/c_grade_bin"
+    # Use the system temp dir so this works on both Linux (/tmp) and Windows.
+    binary_dir = os.path.join(tempfile.gettempdir(), "c_grade_bin")
     os.makedirs(binary_dir, exist_ok=True)
     binary_name = os.path.splitext(os.path.basename(source_path))[0] + "_bin"
     binary_path = os.path.join(binary_dir, binary_name)
@@ -62,12 +64,15 @@ def run_first_pass(source_path: str, rules_path: str, smoke_input: str = "7 5\n"
         result["error"] = f"Compilation failed: {compile_res.stderr}"
         return result
 
+    if not os.path.exists(binary_path) and os.path.exists(binary_path + ".exe"):
+        binary_path = binary_path + ".exe"
+
     result["compiled"] = True
     result["binary_path"] = binary_path
 
     # 4. Smoke Run (Test with user-defined sample input under time/memory limits)
     time_limit = rules.get("time_limit_s", 1.0)
-    mem_limit = rules.get("memory_limit_mb", 64)
+    mem_limit  = rules.get("memory_limit_mb", 64)
 
     if not smoke_input.endswith('\n'):
         smoke_input += '\n'

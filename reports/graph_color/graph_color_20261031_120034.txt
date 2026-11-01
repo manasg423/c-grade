@@ -1,0 +1,38 @@
+==============================================================
+  C-Grade Student Feedback  —  graph_color_20261031_120034.c
+  Generated : 2026-10-31T12:01:25.866640+00:00
+  Problem   : graph_color
+==============================================================
+
+  Overall Grade : 76.5 / 100  [C]
+
+  -- Gatekeeper Status --
+  Compiled       : YES
+  Smoke Test     : PASSED
+
+  Metric              Weight     Score  Contrib  Summary
+  ------------------------------------------------------
+  CORRECTNESS            20%   10.0/10     20.0  Passed all 5/5 I/O test cases.
+  LOGICAL                10%    8.0/10      8.0  Failed 1/5 edge cases. Fails on input: 1
+1 (Incorr...
+  MEMORY_SAFETY          10%    0.0/10      0.0  Runtime analysis detected 1 ASan/UBSan issue(s) an...
+  COMPLEXITY             10%    5.0/10      5.0  Expected O(N) scaling, but observed nearly constan...
+  STATIC_ANALYSIS        10%    8.5/10      8.5  Detected 1 warning(s), 1 style issue(s). Issues: L...
+  COMPILER_WARNINGS      10%   10.0/10     10.0  No compiler warnings or errors detected.
+  MODULARITY             10%   10.0/10     10.0  Good modularity: Detected main() and 1 helper func...
+  READABILITY            10%    5.0/10      5.0  No explanatory comments provided.; Terse/single-le...
+
+  -- Where Your Code Failed --
+  Test 01  [LOGICAL]
+          INPUT    : 1 1
+          EXPECTED : 1
+          GOT      : 0
+          WHY      : Incorrect output on boundary test case
+
+  -- Suggestions to Raise Your Grade --
+  - Account for edge cases: test your code with zero, negative numbers, and boundary limits.
+  - Fix memory safety issues: prevent out-of-bounds array access, initialize all pointers, and free allocated memory.
+  - Optimize time complexity: reduce nested iterations to meet the required O(N) asymptotic bound.
+  - Improve readability: use descriptive variable names instead of single letters; add a brief comment above main() explaining the approach.
+
+==============================================================
