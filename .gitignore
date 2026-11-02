@@ -3,9 +3,6 @@ __pycache__/
 *.pyc
 *.o
 .DS_Store
-reports/
-tests/
-rules/
-submissions/
+problems/
 /tmp/
 venv/
