@@ -44,7 +44,7 @@ EXECUTION_ANALYZERS = {  # These need a valid binary; skip on smoke-test fail
     "io_tests",
     "edge_case_runner",
     "sanitizer_run",
-    "complexity_estimator",
+    "complexity_estimator"
 }
 
 

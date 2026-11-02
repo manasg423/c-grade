@@ -136,27 +136,35 @@ def fit_growth(measurements, config=None):
         confidence = "medium"
     else:
         confidence = "low"
-
-    return {
-        "complexity": best["complexity"],
-        "dominant_asymptotic": best["complexity"],
-        "generic_family": best["generic_family"],
-        "fitted_function": f"{best['fixed_cost']:.6g} + {best['scale']:.6g} * {best['complexity']}",
-        "model": "fixed_candidate", "model_family": "fixed_candidate",
-        "parameters": {"fixed_cost": best["fixed_cost"], "scale": best["scale"]},
-        "confidence": confidence, "fit_error": round(best["fit_error"], 8),
-        "bic": round(best["bic"], 6),
-        "model_selection": {"bic_gap_to_runner_up": None if gap is None else round(gap, 6),
-                            "candidate_count": len(candidates)},
-        "cross_validation_log_error": None,
-        "residual_diagnostics": {"log_rmse": round(best["log_rmse"], 8),
-                                 "max_abs_log_residual": round(max(map(abs, best["log_residuals"])), 8)},
-        "competing_models": [{"complexity": c["complexity"],
-                              "generic_family": c["generic_family"],
-                              "bic": round(c["bic"], 6)} for c in candidates[1:5]],
-        "measurement_count": len(points), "valid_observation_count": len(points),
-        "excluded_observation_count": len(excluded), "excluded_observations": excluded,
-        "warnings": [], "original_valid_observation_count": len(points) + len(excluded),
-        "measurement_method": selected_method, "raw_measurements": list(measurements or []),
-        "observations_used": points,
-    }
+    competitors = []
+    for candidate in candidates[1:4]:
+        if candidate["family"] == "additive_basis":
+            dterm = _dominant_term(candidate["terms"])
+            label = _complexity_label(dterm)
+        else:
+            p = candidate["parameters"]
+            label = _complexity_label({"p": p["b"], "q": p["c"], "log_d": math.log(p["d"]), "factorial_power": p["e"]})
+        competitors.append({"family": candidate["family"], "complexity": label,
+                            "bic": round(candidate["bic"], 5),
+                            "selection_score": round(candidate.get("selection_score", candidate["bic"]), 5),
+                            "fit_error": round(candidate["fit_error"], 6)})
+        return {"complexity": complexity,
+            "dominant_asymptotic": complexity,
+            "fitted_complexity": fitted_complexity,
+            "generic_family": generic_family,
+            "fitted_function": fitted_function, "model": best["family"],
+            "model_family": best["family"],
+            "parameters": parameters, "confidence": confidence,
+            "fit_error": round(best["fit_error"], 8), "bic": round(best["bic"], 6),
+            "model_selection": {"raw_bic_gap_to_runner_up": (None if not math.isfinite(raw_bic_gap) else round(raw_bic_gap, 6)),
+                                "selection_gap_to_runner_up": (None if not math.isfinite(selection_gap) else round(selection_gap, 6)),
+                                "basis_search_penalty": round(best.get("search_penalty", 0.0), 6)},
+            "cross_validation_log_error": None if cv_error is None else round(cv_error, 8),
+            "residual_diagnostics": diagnostics, "competing_models": competitors,
+            "measurement_count": len(points), "valid_observation_count": len(points),
+            "excluded_observation_count": len(excluded), "excluded_observations": excluded,
+            "warnings": warnings, "original_valid_observation_count": original_valid_count,
+            "measurement_method": points[0].get("method") if points else None,
+            "raw_measurements": list(measurements or []),
+            "observations_used": [{"n": p["n"], "cost": p["cost"], "method": p.get("method")}
+                                  for p in points]}

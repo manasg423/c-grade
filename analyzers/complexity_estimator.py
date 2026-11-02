@@ -94,7 +94,15 @@ def infer_measurement_boundary(source: str) -> dict:
     masked=_mask_comments_strings(source)
     call=_input_call(masked)
     if call is None:
-        return {"supported":False,"reason":"No supported standard input call was found."}
+        main_match = re.search(r'\bmain\s*\([^)]*\)\s*\{', masked)
+        if main_match:
+            return {
+                "supported": True,
+                "offset": main_match.end(),
+                "mode": "main_entry_no_stdin",
+                "reason": "No stdin read was found; count begins at main entry for a fixed-input program.",
+            }
+        return {"supported":False,"reason":"No supported standard input call or main() function was found."}
     call_start,call_end=call
     loops=[]
     for m in re.finditer(r'\b(for|while)\s*\(',masked):
