@@ -9,16 +9,25 @@ import os
 import re
 import sqlite3
 import sys
+sys.dont_write_bytecode = True
 import uuid
 import csv
+import tempfile
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
-import streamlit as st
-
-
 ROOT = Path(__file__).resolve().parent
+PROBLEMS_DIR = ROOT / "problems"
+TEMP_DIR = PROBLEMS_DIR / ".tmp"
+PROBLEMS_DIR.mkdir(parents=True, exist_ok=True)
+TEMP_DIR.mkdir(parents=True, exist_ok=True)
+for temp_var in ("TMP", "TEMP", "TMPDIR"):
+    os.environ[temp_var] = str(TEMP_DIR)
+tempfile.tempdir = str(TEMP_DIR)
 sys.path.insert(0, str(ROOT))
+os.chdir(ROOT)
+
+import streamlit as st
 
 from database import auth, database
 from core.pdf_reports import build_assessment_pdf
@@ -68,7 +77,7 @@ st.markdown(
 def available_rubrics() -> list[str]:
     return sorted(
         Path(path).name.removesuffix("_rules.json")
-        for path in glob.glob(str(ROOT / "rules" / "*_rules.json"))
+        for path in glob.glob(str(PROBLEMS_DIR / "*" / "*_rules.json"))
     )
 
 
@@ -195,6 +204,15 @@ def show_report(report: dict, score: float | None, io_score: float | None,
     )
     safe_assignment = re.sub(r"[^A-Za-z0-9_-]+", "_", assignment_title or "assessment")
     safe_roll = re.sub(r"[^A-Za-z0-9_-]+", "_", roll_no or "student")
+    problem_id = str(report.get("problem", ""))
+    if re.fullmatch(r"[a-z0-9][a-z0-9_-]*", problem_id):
+        report_stem = Path(str(report.get("submission", ""))).stem
+        if not report_stem:
+            report_stem = f"{safe_assignment}_{safe_roll}"
+        report_stem = re.sub(r"[^A-Za-z0-9_-]+", "_", report_stem)
+        report_dir = PROBLEMS_DIR / problem_id / "reports"
+        report_dir.mkdir(parents=True, exist_ok=True)
+        (report_dir / f"{report_stem}.pdf").write_bytes(pdf_bytes)
     st.markdown("#### Full assessment report")
     pdf_data = base64.b64encode(pdf_bytes).decode("ascii")
     view_key = f"view_report_{safe_assignment}_{safe_roll}_{report.get('generated_at', 'latest')}"
@@ -361,8 +379,9 @@ int main() {
         st.error(str(exc))
         return
 
-    tests_dir = ROOT / "tests" / problem_id
-    submission_dir = ROOT / "submissions" / problem_id
+    problem_dir = PROBLEMS_DIR / problem_id
+    tests_dir = problem_dir / "tests"
+    submission_dir = problem_dir / "submissions"
     tests_dir.mkdir(parents=True, exist_ok=True)
     submission_dir.mkdir(parents=True, exist_ok=True)
     oracle_path = tests_dir / "oracle.c"
@@ -371,7 +390,7 @@ int main() {
         if oracle_upload else oracle_editor
     )
     oracle_path.write_text(oracle_code, encoding="utf-8")
-    rules_path = ROOT / "rules" / f"{problem_id}_rules.json"
+    rules_path = problem_dir / f"{problem_id}_rules.json"
     rules_path.write_text(json.dumps(rules, indent=2), encoding="utf-8")
     due_value = datetime.combine(due, time.max).isoformat(timespec="seconds")
     database.create_assignment(title, description, due_value, problem_id)
@@ -445,8 +464,9 @@ def assignment_materials_view(assignments) -> None:
         st.error("This assignment has an invalid problem slug.")
         return
 
-    rules_path = ROOT / "rules" / f"{problem_id}_rules.json"
-    tests_dir = ROOT / "tests" / problem_id
+    problem_dir = PROBLEMS_DIR / problem_id
+    rules_path = problem_dir / f"{problem_id}_rules.json"
+    tests_dir = problem_dir / "tests"
     oracle_path = tests_dir / "oracle.c"
     if not rules_path.is_file():
         st.error(f"Rules file not found: {rules_path.relative_to(ROOT)}")
@@ -950,11 +970,12 @@ def student_view() -> None:
             if len(source.encode("utf-8")) > 200_000:
                 st.error("Source files must be smaller than 200 KB.")
                 return
-            rules_path = ROOT / "rules" / f"{assignment['problem_id']}_rules.json"
+            problem_dir = PROBLEMS_DIR / assignment["problem_id"]
+            rules_path = problem_dir / f"{assignment['problem_id']}_rules.json"
             if not rules_path.is_file():
                 st.error("The grading rules for this assignment are unavailable.")
                 return
-            source_dir = ROOT / "submissions" / assignment["problem_id"] / "portal"
+            source_dir = problem_dir / "submissions"
             source_dir.mkdir(parents=True, exist_ok=True)
             source_path = source_dir / f"student_{user['id']}_{uuid.uuid4().hex}.c"
             try:
@@ -995,9 +1016,6 @@ def student_view() -> None:
                             result["feedback_summary"], student_name=user["name"],
                             roll_no=user["roll_no"], assignment_title=assignment["title"],
                             submitted_code=source)
-            finally:
-                source_path.unlink(missing_ok=True)
-
     else:
         st.markdown('<p class="portal-kicker">Account security</p>', unsafe_allow_html=True)
         st.title("Change password")

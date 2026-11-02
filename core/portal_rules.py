@@ -15,14 +15,14 @@ def build_rules(
 ) -> dict:
     analyzer_specs = [
         ("io_tests", "correctness", 0.20, {
-            "testset_dir": f"tests/{problem_id}/",
-            "oracle_path": f"tests/{problem_id}/oracle.c",
+            "testset_dir": f"problems/{problem_id}/tests/",
+            "oracle_path": f"problems/{problem_id}/tests/oracle.c",
             "auto_generate": True,
             "num_generated_tests": int(auto_gen_count),
             "seed": 42,
         }),
         ("edge_case_runner", "logical", 0.10, {
-            "oracle_path": f"tests/{problem_id}/oracle.c",
+            "oracle_path": f"problems/{problem_id}/tests/oracle.c",
             "cases": ["empty", "whitespace"],
             "test_inputs": [sample_input, "0", "-1"],
             "seed": 42,
@@ -44,7 +44,7 @@ def build_rules(
         ("compiler_warnings", "compiler_warnings", 0.10, {}),
         ("function_split", "modularity", 0.10, {}),
         ("similarity_flag", "plagiarism_check", 0.10, {
-            "submissions_dir": f"submissions/{problem_id}/",
+            "submissions_dir": f"problems/{problem_id}/submissions/",
         }),
         ("llm_review", "readability", 0.10, {
             "model": "qwen3.5:2b",
