@@ -1,5 +1,6 @@
 import os
 import sys
+sys.dont_write_bytecode = True
 import glob
 import json
 import inspect
@@ -7,10 +8,19 @@ import tempfile
 import importlib
 import subprocess
 from datetime import datetime
+from pathlib import Path
 import streamlit as st
 
-# Ensure project root is in sys.path
-sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
+# Keep this flow's data and temporary files under testing/.
+ROOT = Path(__file__).resolve().parent.parent
+TESTING_DIR = Path(__file__).resolve().parent
+TEMP_DIR = TESTING_DIR / ".tmp"
+sys.path.insert(0, str(ROOT))
+os.chdir(TESTING_DIR)
+TEMP_DIR.mkdir(parents=True, exist_ok=True)
+for temp_var in ("TMP", "TEMP", "TMPDIR"):
+    os.environ[temp_var] = str(TEMP_DIR)
+tempfile.tempdir = str(TEMP_DIR)
 
 from core.first_pass import run_first_pass
 from core.reporter import generate_report
