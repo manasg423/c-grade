@@ -3,9 +3,17 @@ __pycache__/
 *.pyc
 *.o
 .DS_Store
+problems/
 reports/
 tests/
 rules/
 submissions/
+analyzer_test_runs/
 /tmp/
 venv/
+.env
+portal.db
+portal.db-shm
+portal.db-wal
+.github/
+.streamlit/

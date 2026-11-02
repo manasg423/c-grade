@@ -29,7 +29,12 @@ def _get_fingerprints(text, k=10, window_size=5):
     return fingerprints
 
 def evaluate(source_path, binary_path, params, limits):
-    corpus_dir = params.get('corpus_dir', 'submissions/')
+    # Check for the new key, fall back to the old key, or default to the file's current directory
+    corpus_dir = (
+        params.get('submissions_dir') 
+        or params.get('corpus_dir') 
+        or os.path.dirname(os.path.abspath(source_path))
+    )
     threshold = params.get('flag_threshold', 0.85)
     
     try:

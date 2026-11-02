@@ -4,8 +4,8 @@ core/reporter.py
 Collates all analyzer results and first-pass gatekeeper data into a
 structured final report. Writes two artefacts into the reports/ directory:
 
-  reports/<problem>/<stem>.json  — machine-readable audit report (includes full evidence)
-  reports/<problem>/<stem>.txt   — student-facing report (actionable, without plagiarism)
+  problems/<problem>/reports/<stem>.json  — machine-readable audit report (includes full evidence)
+  problems/<problem>/reports/<stem>.txt   — student-facing report (actionable, without plagiarism)
 
 Public API
 ----------
@@ -485,7 +485,7 @@ def generate_report(
     # Persist to disk
     # ------------------------------------------------------------------
     stem       = os.path.splitext(os.path.basename(submission_path))[0]
-    report_dir = os.path.join("reports", problem_id)
+    report_dir = os.path.join("problems", problem_id, "reports")
     os.makedirs(report_dir, exist_ok=True)
 
     json_path = os.path.join(report_dir, f"{stem}.json")

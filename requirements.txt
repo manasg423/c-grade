@@ -2,3 +2,5 @@ streamlit
 lizard
 psutil
 requests
+python-dotenv
+reportlab

@@ -1,0 +1,1028 @@
+"""Authenticated student and teacher portal for the C-Grade engine."""
+
+from __future__ import annotations
+
+import glob
+import base64
+import json
+import os
+import re
+import sqlite3
+import sys
+import uuid
+import csv
+from datetime import date, datetime, time, timedelta
+from pathlib import Path
+
+import streamlit as st
+
+
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+
+from database import auth, database
+from core.pdf_reports import build_assessment_pdf
+from core.portal_rules import build_rules
+from test_case_generator import generate_all_test_cases
+
+
+st.set_page_config(page_title="C-Grade Portal", page_icon="C", layout="wide")
+database.initialize_database()
+
+st.markdown(
+    """
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&display=swap');
+    :root { --ink:#edf3ee; --muted:#aab8b0; --line:#38473f; --paper:#111916; --panel:#1c2822; --lime:#c9ef6a; --green:#245c47; }
+    html, body, [class*="css"] { font-family:'DM Sans',sans-serif; color:var(--ink) !important; }
+    .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] { background:var(--paper) !important; color:var(--ink) !important; }
+    .stMarkdown, .stMarkdown p, [data-testid="stWidgetLabel"], [data-testid="stCaptionContainer"], label { color:var(--ink) !important; }
+    input, textarea, [data-baseweb="select"] > div { background:#202d27 !important; color:var(--ink) !important; }
+    [data-testid="stTextInput"] input, [data-testid="stTextArea"] textarea { -webkit-text-fill-color:var(--ink) !important; }
+    [data-testid="stTextInput"] input::placeholder, [data-testid="stTextArea"] textarea::placeholder { -webkit-text-fill-color:var(--muted) !important; }
+    [data-testid="stSidebar"] { background:#192522; }
+    [data-testid="stSidebar"] * { color:#eef3ed; }
+    [data-testid="stSidebar"] [data-testid="stRadio"] label { padding:7px 10px; border-radius:5px; }
+    [data-testid="stSidebar"] button[kind="secondary"] { background:#2b3934 !important; color:#f4f7f3 !important; border:1px solid #53635c !important; }
+    [data-testid="stSidebar"] button[kind="secondary"] p { color:#f4f7f3 !important; }
+    [data-testid="stSidebar"] button[kind="secondary"]:hover { background:#c9ef6a !important; color:#192522 !important; border-color:#c9ef6a !important; }
+    [data-testid="stSidebar"] button[kind="secondary"]:hover p { color:#192522 !important; }
+    h1,h2,h3 { letter-spacing:0 !important; color:var(--ink) !important; }
+    h1 { font-size:2rem !important; font-weight:700 !important; }
+    h2 { font-size:1.35rem !important; }
+    [data-testid="stMetric"] { background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:14px 16px; }
+    [data-testid="stMetricLabel"] { color:var(--muted); }
+    .stButton button[kind="primary"], .stFormSubmitButton button[kind="primary"] { background:#245c47; border-color:#245c47; }
+    .stCode, code, pre, textarea { font-family:'DM Mono',monospace !important; }
+    [data-testid="stDataFrame"] { border:1px solid var(--line); border-radius:5px; }
+    [data-testid="stExpander"] { border-color:var(--line); }
+    .portal-kicker { color:var(--lime); font:500 11px 'DM Mono',monospace; text-transform:uppercase; letter-spacing:0; }
+    .portal-rule { border-top:1px solid var(--line); margin:1.2rem 0; }
+    @media (max-width: 700px) { h1 { font-size:1.6rem !important; } }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+def available_rubrics() -> list[str]:
+    return sorted(
+        Path(path).name.removesuffix("_rules.json")
+        for path in glob.glob(str(ROOT / "rules" / "*_rules.json"))
+    )
+
+
+def metric_score(report: dict, category: str) -> float | None:
+    metrics = report.get("metrics", [])
+    matched = []
+    for metric in metrics:
+        key = f"{metric.get('analyzer', '')} {metric.get('name', '')}".lower()
+        if category == "io" and ("io_tests" in key or "i/o" in key):
+            matched.append(float(metric.get("score", 0)))
+        elif category == "sanitizer" and "sanitizer" in key:
+            matched.append(float(metric.get("score", 0)))
+        elif category == "quality" and any(
+            token in key
+            for token in ("compiler_warnings", "static_analysis", "function_split", "quality")
+        ):
+            matched.append(float(metric.get("score", 0)))
+    return round(sum(matched) / len(matched), 4) if matched else None
+
+
+def evaluation_status(score: float | None) -> str:
+    if score is None:
+        return "Pending"
+    return "Passed" if score >= 0.999 else "Violations Detected"
+
+
+def assignment_deadline(due_value: str | None) -> tuple[str, bool]:
+    if not due_value:
+        return "No deadline", False
+    try:
+        due_day = datetime.fromisoformat(str(due_value)).date()
+    except ValueError:
+        due_day = date.fromisoformat(str(due_value)[:10])
+    if due_day < date.today():
+        return "Closed", True
+    if due_day == date.today():
+        return "Due today", False
+    return "Open", False
+
+
+def evaluation_record(report: dict) -> dict:
+    first_pass = report.get("first_pass", {})
+    suggestions = report.get("suggestions", [])
+    summary = "\n".join(str(item) for item in suggestions)
+    if not summary:
+        summary = "Evaluation complete. Review the metric evidence for details."
+    return {
+        "score": max(0.0, min(1.0, float(report.get("grade", 0)) / 100)),
+        "io_score": metric_score(report, "io"),
+        "quality_score": metric_score(report, "quality"),
+        "sanitizer_score": metric_score(report, "sanitizer"),
+        "feedback_summary": summary,
+        "raw_evidence": report,
+        "status": "graded" if first_pass.get("compiled") else "failed",
+    }
+
+
+@st.dialog("C-Grade Assessment PDF", width="large")
+def show_pdf_dialog(pdf_data: str) -> None:
+    st.iframe(
+        f"data:application/pdf;base64,{pdf_data}",
+        height=760,
+        alt="C-Grade assessment report",
+    )
+
+
+def show_report(report: dict, score: float | None, io_score: float | None,
+                quality_score: float | None, sanitizer_score: float | None,
+                feedback: str | None, include_private: bool = False,
+                student_name: str = "", roll_no: str = "",
+                assignment_title: str = "", submitted_at: str = "",
+                submitted_code: str = "") -> None:
+    columns = st.columns(4)
+    values = (
+        ("Overall", score),
+        ("I/O", io_score),
+        ("Code quality", quality_score),
+        ("Sanitizers", sanitizer_score),
+    )
+    for column, (label, value) in zip(columns, values):
+        column.metric(label, f"{value * 100:.1f}%" if value is not None else "N/A")
+    if feedback:
+        st.markdown("#### Feedback")
+        st.write(feedback)
+    visible_metrics = report.get("metrics", [])
+    if not include_private:
+        visible_metrics = [
+            item for item in visible_metrics
+            #if not any(
+                #token in f"{item.get('analyzer', '')} {item.get('name', '')}".lower()
+                #for token in ("similarity", "plagiarism", "originality")
+            #)
+        ]
+    visible_report = report
+    if not include_private:
+        visible_report = dict(report)
+        visible_report["metrics"] = visible_metrics
+        visible_report["flags"] = [
+            flag for flag in report.get("flags", [])
+            #if not any(token in str(flag).lower() for token in ("similarity", "plagiarism", "originality"))
+        ]
+    metrics = visible_metrics
+    if metrics:
+        st.markdown("#### Analyzer breakdown")
+        st.dataframe(
+            [
+                {
+                    "Metric": item.get("name", item.get("analyzer", "")),
+                    "Score": f"{float(item.get('score', 0)) * 100:.1f}%",
+                    "Feedback": item.get("feedback", ""),
+                }
+                for item in metrics
+            ],
+            width="stretch",
+            hide_index=True,
+        )
+    pdf_bytes = build_assessment_pdf(
+        visible_report, score, io_score, quality_score, sanitizer_score, feedback,
+        student_name=student_name,
+        roll_no=roll_no,
+        assignment_title=assignment_title,
+        submitted_at=submitted_at,
+        submitted_code=submitted_code,
+    )
+    safe_assignment = re.sub(r"[^A-Za-z0-9_-]+", "_", assignment_title or "assessment")
+    safe_roll = re.sub(r"[^A-Za-z0-9_-]+", "_", roll_no or "student")
+    st.markdown("#### Full assessment report")
+    pdf_data = base64.b64encode(pdf_bytes).decode("ascii")
+    view_key = f"view_report_{safe_assignment}_{safe_roll}_{report.get('generated_at', 'latest')}"
+    download_key = f"download_report_{safe_assignment}_{safe_roll}_{report.get('generated_at', 'latest')}"
+    view_col, download_col = st.columns(2)
+    with view_col:
+        if st.button("View PDF", key=view_key, width="stretch"):
+            show_pdf_dialog(pdf_data)
+    with download_col:
+        st.download_button(
+            "Download PDF report",
+            data=pdf_bytes,
+            file_name=f"{safe_assignment}_{safe_roll}_report.pdf",
+            mime="application/pdf",
+            key=download_key,
+            width="stretch",
+        )
+
+
+def login_screen() -> None:
+    st.sidebar.title("C-Grade")
+    st.sidebar.caption("Student assessment portal")
+    st.markdown('<p class="portal-kicker">Course workspace / Sign in</p>', unsafe_allow_html=True)
+    st.title("Welcome to C-Grade")
+    st.write("Sign in to manage assignments or review your assessment results.")
+    left, right = st.columns([1, 1.15], gap="large")
+    with left:
+        role = st.radio("Account type", ["Student", "Teacher"], horizontal=True)
+        with st.form("login_form"):
+            if role == "Teacher":
+                username = st.text_input("Username", autocomplete="username")
+                password = st.text_input("Password", type="password", autocomplete="current-password")
+            else:
+                username = st.text_input("Roll number", autocomplete="username")
+                password = st.text_input("Password", type="password", autocomplete="current-password")
+            submitted = st.form_submit_button("Sign in", type="primary", width="stretch")
+        if submitted:
+            if role == "Teacher" and auth.verify_teacher(username, password):
+                st.session_state["portal_user"] = {"role": "teacher", "name": "Teacher"}
+                st.rerun()
+            if role == "Student":
+                student = auth.authenticate_student(username, password)
+                if student:
+                    st.session_state["portal_user"] = {
+                        "role": "student", "id": student["id"],
+                        "name": student["name"], "roll_no": student["roll_no"],
+                    }
+                    st.rerun()
+            st.error("Invalid credentials.")
+        if role == "Teacher" and not (
+            os.environ.get("TEACHER_USERNAME") and os.environ.get("TEACHER_PASSWORD")
+        ):
+            st.warning("Teacher login is not configured. Set TEACHER_USERNAME and TEACHER_PASSWORD in .env.")
+    with right:
+        st.markdown("### Assessment, with a clear record")
+        st.write("Assignments, submissions, and detailed C grading reports in one place.")
+        st.markdown('<div class="portal-rule"></div>', unsafe_allow_html=True)
+
+
+def new_assignment_view(assignments) -> None:
+    st.markdown('<p class="portal-kicker">Course setup</p>', unsafe_allow_html=True)
+    st.title("New assignment")
+    st.caption("All configuration fields are required. Problem description is optional.")
+    with st.form("assignment_form"):
+        title = st.text_input("Assignment title")
+        description = st.text_area("Problem description (optional)", height=90)
+        problem_id = st.text_input("Problem slug (used for rules and test folders)").strip().lower()
+        due = st.date_input(
+            "Due date",
+            value=date.today() + timedelta(days=7),
+            min_value=date.today(),
+            format="YYYY-MM-DD",
+        )
+
+        col1, col2 = st.columns(2)
+        with col1:
+            time_limit = st.number_input("Time limit (seconds)", min_value=0.5, max_value=10.0, value=1.0, step=0.5)
+            memory_limit = st.number_input("Sandbox memory limit (MB)", min_value=16, max_value=512, value=64, step=16)
+            sample_input = st.text_area("Sample smoke/sanitizer input", value="10 20", height=80)
+        with col2:
+            input_type = st.selectbox(
+                "Complexity generator input type",
+                ["string", "integer_array", "raw_array", "single_number", "fixed_arithmetic"],
+            )
+            expected_complexity = st.selectbox(
+                "Expected asymptotic complexity",
+                ["O(1)", "O(log N)", "O(N)", "O(N log N)", "O(N^2)", "O(N^3)"],
+            )
+            auto_gen_count = st.number_input(
+                "Auto-generated I/O test cases", min_value=1, max_value=20,
+                value=5, step=1,
+            )
+
+        st.markdown("#### Teacher reference solution (`oracle.c`)")
+        oracle_upload = st.file_uploader("Upload teacher C source", type=["c"])
+        default_oracle = """#include <stdio.h>
+
+int main() {
+    int a, b;
+    if (scanf("%d %d", &a, &b) == 2) {
+        printf("%d\\n", a + b);
+    }
+    return 0;
+}
+"""
+        oracle_editor = st.text_area(
+            "Reference C code (required if no file is uploaded)",
+            value=default_oracle, height=180,
+        )
+
+        st.markdown("#### Specialist analyzers")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            use_io = st.checkbox("io_tests (20%)", value=True)
+            use_edge = st.checkbox("edge_case_runner (10%)", value=True)
+            use_san = st.checkbox("sanitizer_run (10%)", value=True)
+        with c2:
+            use_comp = st.checkbox("complexity_estimator (10%)", value=True)
+            use_stat = st.checkbox("static_analysis (10%)", value=True)
+            use_warn = st.checkbox("compiler_warnings (10%)", value=True)
+        with c3:
+            use_func = st.checkbox("function_split (10%)", value=True)
+            use_sim = st.checkbox("similarity_flag (10%)", value=True)
+            use_llm = st.checkbox("llm_review (10%)", value=True)
+        create = st.form_submit_button("Save and deploy assignment", type="primary")
+
+    if not create:
+        return
+    if not title.strip():
+        st.error("Assignment title is required.")
+        return
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", problem_id):
+        st.error("Use a slug with lowercase letters, numbers, hyphens, and underscores.")
+        return
+    if not sample_input.strip():
+        st.error("Sample smoke/sanitizer input is required.")
+        return
+    if not (oracle_upload or oracle_editor.strip()):
+        st.error("Upload or enter a teacher reference C solution.")
+        return
+
+    try:
+        rules = build_rules(
+            problem_id=problem_id,
+            time_limit=time_limit,
+            memory_limit=memory_limit,
+            sample_input=sample_input,
+            input_type=input_type,
+            expected_complexity=expected_complexity,
+            auto_gen_count=auto_gen_count,
+            enabled={
+                "io_tests": use_io,
+                "edge_case_runner": use_edge,
+                "sanitizer_run": use_san,
+                "complexity_estimator": use_comp,
+                "static_analysis": use_stat,
+                "compiler_warnings": use_warn,
+                "function_split": use_func,
+                "similarity_flag": use_sim,
+                "llm_review": use_llm,
+            },
+        )
+    except ValueError as exc:
+        st.error(str(exc))
+        return
+
+    tests_dir = ROOT / "tests" / problem_id
+    submission_dir = ROOT / "submissions" / problem_id
+    tests_dir.mkdir(parents=True, exist_ok=True)
+    submission_dir.mkdir(parents=True, exist_ok=True)
+    oracle_path = tests_dir / "oracle.c"
+    oracle_code = (
+        oracle_upload.getvalue().decode("utf-8", errors="replace")
+        if oracle_upload else oracle_editor
+    )
+    oracle_path.write_text(oracle_code, encoding="utf-8")
+    rules_path = ROOT / "rules" / f"{problem_id}_rules.json"
+    rules_path.write_text(json.dumps(rules, indent=2), encoding="utf-8")
+    due_value = datetime.combine(due, time.max).isoformat(timespec="seconds")
+    database.create_assignment(title, description, due_value, problem_id)
+    try:
+        with st.spinner("Generating I/O and edge test cases from oracle.c..."):
+            generated = generate_all_test_cases(
+                problem_id,
+                tests_dir=str(tests_dir),
+                oracle_path=str(oracle_path),
+                sample_input=sample_input,
+                problem_description=description,
+                num_io=int(auto_gen_count),
+                num_edge=5,
+                force_regenerate=True,
+            )
+        st.success(
+            f"Assignment deployed. Generated {generated.get('io_count', 0)} I/O and "
+            f"{generated.get('edge_count', 0)} edge cases."
+        )
+    except Exception as exc:
+        st.warning(f"Assignment saved; test generation reported: {exc}")
+    st.rerun()
+
+
+def assignment_materials_view(assignments) -> None:
+    st.markdown('<p class="portal-kicker">Deployment inspector</p>', unsafe_allow_html=True)
+    st.title("Edit assignment")
+    if not assignments:
+        st.info("Create an assignment before inspecting its deployment files.")
+        return
+
+    assignments_by_id = {item["id"]: item for item in assignments}
+    assignment_id = st.selectbox(
+        "Assignment", list(assignments_by_id),
+        format_func=lambda item_id: (
+            f"{assignments_by_id[item_id]['title']} · "
+            f"{assignments_by_id[item_id]['problem_id']}"
+        ),
+        key="materials_assignment_id",
+    )
+    assignment = assignments_by_id[assignment_id]
+    problem_id = assignment["problem_id"]
+    st.markdown(f"### {assignment['title']}  ·  `{problem_id}`")
+    current_due = (
+        date.fromisoformat(str(assignment["due_date"])[:10])
+        if assignment["due_date"] else date.today() + timedelta(days=7)
+    )
+    st.caption(f"Created: {assignment['created_at']} · Problem slug is fixed to keep deployed file paths stable.")
+    with st.form(f"edit_assignment_form_{assignment_id}"):
+        updated_title = st.text_input("Assignment title", value=assignment["title"])
+        updated_description = st.text_area(
+            "Problem description (optional)", value=assignment["description"] or "", height=90
+        )
+        updated_due = st.date_input(
+            "Due date", value=current_due, format="YYYY-MM-DD",
+        )
+        save_assignment = st.form_submit_button("Save assignment details", type="primary")
+    if save_assignment:
+        if not updated_title.strip():
+            st.error("Assignment title is required.")
+        else:
+            due_value = datetime.combine(updated_due, time.max).isoformat(timespec="seconds")
+            if database.update_assignment(
+                assignment_id, updated_title, updated_description, due_value
+            ):
+                st.success("Assignment details updated.")
+                st.rerun()
+            st.error("Assignment was not found.")
+
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", problem_id):
+        st.error("This assignment has an invalid problem slug.")
+        return
+
+    rules_path = ROOT / "rules" / f"{problem_id}_rules.json"
+    tests_dir = ROOT / "tests" / problem_id
+    oracle_path = tests_dir / "oracle.c"
+    if not rules_path.is_file():
+        st.error(f"Rules file not found: {rules_path.relative_to(ROOT)}")
+        return
+    try:
+        rules_data = json.loads(rules_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        st.error(f"Could not read rules JSON: {exc}")
+        return
+
+    metrics = rules_data.get("metrics", [])
+    io_rule_count = next(
+        (int(item.get("params", {}).get("num_generated_tests", 5))
+         for item in metrics if item.get("analyzer") == "io_tests"),
+        5,
+    )
+    io_files = sorted((tests_dir / "auto_generated").glob("gen_*.in"))
+    if not io_files:
+        io_files = sorted(tests_dir.glob("*.in"))
+    edge_files = sorted((tests_dir / "edge_cases").glob("edge_*.in"))
+    complexity_metric = next(
+        (item for item in metrics if item.get("analyzer") == "complexity_estimator"),
+        None,
+    )
+    complexity_params = (complexity_metric or {}).get("params", {})
+    input_types = ["string", "integer_array", "raw_array", "single_number", "fixed_arithmetic"]
+    complexities = ["O(1)", "O(log N)", "O(N)", "O(N log N)", "O(N^2)", "O(N^3)"]
+
+    st.markdown("#### Assignment configuration")
+    with st.form(f"edit_rules_config_{problem_id}"):
+        config_col1, config_col2 = st.columns(2)
+        with config_col1:
+            edited_time = st.number_input(
+                "Time limit (seconds)", min_value=0.5, max_value=10.0,
+                value=float(rules_data.get("time_limit_s", 1.0)), step=0.5,
+                key=f"edit_time_{problem_id}",
+            )
+            edited_memory = st.number_input(
+                "Sandbox memory (MB)", min_value=16, max_value=512,
+                value=max(16, min(512, int(rules_data.get("memory_limit_mb", 64)))),
+                step=16, key=f"edit_memory_{problem_id}",
+            )
+            edited_smoke = st.text_input(
+                "Sample smoke/sanitizer input",
+                value=str(rules_data.get("smoke_input", "")),
+                key=f"edit_smoke_{problem_id}",
+            )
+            edited_io_count = st.number_input(
+                "Generated I/O count", min_value=1, max_value=30,
+                value=max(1, min(30, io_rule_count)), step=1,
+                key=f"edit_io_count_{problem_id}",
+            )
+        with config_col2:
+            current_input_type = complexity_params.get("input_type", input_types[0])
+            current_complexity = complexity_params.get("expected_complexity", complexities[0])
+            edited_input_type = st.selectbox(
+                "Complexity generator input type", input_types,
+                index=input_types.index(current_input_type) if current_input_type in input_types else 0,
+                key=f"edit_input_type_{problem_id}",
+            )
+            edited_complexity = st.selectbox(
+                "Expected asymptotic complexity", complexities,
+                index=complexities.index(current_complexity) if current_complexity in complexities else 0,
+                key=f"edit_complexity_{problem_id}",
+            )
+            edited_edge_count = st.number_input(
+                "Generated edge-case count", min_value=1, max_value=20,
+                value=max(1, min(20, len(edge_files) or 5)), step=1,
+                key=f"edit_edge_count_{problem_id}",
+            )
+        save_config = st.form_submit_button("Save configuration and regenerate cases", type="primary")
+    if save_config:
+        if not edited_smoke.strip():
+            st.error("Sample smoke/sanitizer input is required.")
+        else:
+            rules_data["time_limit_s"] = float(edited_time)
+            rules_data["memory_limit_mb"] = int(edited_memory)
+            rules_data["smoke_input"] = edited_smoke
+            for metric in rules_data.get("metrics", []):
+                if metric.get("analyzer") == "io_tests":
+                    metric.setdefault("params", {})["num_generated_tests"] = int(edited_io_count)
+                if metric.get("analyzer") == "complexity_estimator":
+                    metric.setdefault("params", {})["input_type"] = edited_input_type
+                    metric["params"]["expected_complexity"] = edited_complexity
+            rules_path.write_text(json.dumps(rules_data, indent=2), encoding="utf-8")
+            st.session_state[f"rules_editor_{problem_id}"] = json.dumps(rules_data, indent=2)
+            if not oracle_path.is_file():
+                st.error("Save oracle.c before regenerating cases.")
+            else:
+                try:
+                    with st.spinner("Regenerating I/O and edge cases..."):
+                        generated = generate_all_test_cases(
+                            problem_id,
+                            tests_dir=str(tests_dir),
+                            oracle_path=str(oracle_path),
+                            sample_input=edited_smoke,
+                            problem_description=assignment["description"] or "",
+                            num_io=int(edited_io_count),
+                            num_edge=int(edited_edge_count),
+                            force_regenerate=True,
+                        )
+                    st.success(
+                        f"Saved settings and generated {generated.get('io_count', 0)} I/O, "
+                        f"{generated.get('edge_count', 0)} edge cases."
+                    )
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Settings saved, but test generation failed: {exc}")
+
+    first, second, third = st.columns(3)
+    first.metric("Time limit", f"{rules_data.get('time_limit_s', 'N/A')} s")
+    second.metric("Memory limit", f"{rules_data.get('memory_limit_mb', 'N/A')} MB")
+    third.metric("Submissions", len(database.list_assignment_submissions(assignment_id)))
+
+    st.markdown("#### Teacher oracle (`oracle.c`)")
+    oracle_text = oracle_path.read_text(encoding="utf-8", errors="replace") if oracle_path.is_file() else ""
+    edited_oracle = st.text_area(
+        "View or edit the reference C source", value=oracle_text, height=220,
+        key=f"oracle_editor_{problem_id}",
+    )
+    if st.button("Save oracle.c", key=f"save_oracle_{problem_id}"):
+        tests_dir.mkdir(parents=True, exist_ok=True)
+        oracle_path.write_text(edited_oracle, encoding="utf-8")
+        st.success("Oracle source saved.")
+        st.rerun()
+
+    st.markdown("#### Edit individual analyzer rules")
+    for metric_index, metric in enumerate(metrics):
+        analyzer = metric.get("analyzer", f"metric_{metric_index}")
+        with st.expander(f"{metric.get('name', analyzer)} · {analyzer}"):
+            with st.form(f"edit_metric_{problem_id}_{metric_index}"):
+                edited_metric_name = st.text_input(
+                    "Rule name", value=str(metric.get("name", analyzer)),
+                    key=f"metric_name_{problem_id}_{metric_index}",
+                )
+                edited_params_text = st.text_area(
+                    "Analyzer parameters (JSON)",
+                    value=json.dumps(metric.get("params", {}), indent=2),
+                    height=180, key=f"metric_params_{problem_id}_{metric_index}",
+                )
+                save_metric = st.form_submit_button("Save this analyzer rule")
+            if save_metric:
+                try:
+                    edited_params = json.loads(edited_params_text)
+                    if not isinstance(edited_params, dict):
+                        raise ValueError("Analyzer parameters must be a JSON object.")
+                    rules_data["metrics"][metric_index]["name"] = edited_metric_name.strip()
+                    rules_data["metrics"][metric_index]["params"] = edited_params
+                    rules_path.write_text(json.dumps(rules_data, indent=2), encoding="utf-8")
+                    st.session_state[f"rules_editor_{problem_id}"] = json.dumps(rules_data, indent=2)
+                    st.success(f"{analyzer} rule saved.")
+                    st.rerun()
+                except (json.JSONDecodeError, ValueError) as exc:
+                    st.error(f"Rule was not saved: {exc}")
+
+    st.markdown("#### Deployed rules JSON")
+    edited_rules = st.text_area(
+        "View or edit rules/<problem>_rules.json",
+        value=json.dumps(rules_data, indent=2), height=340,
+        key=f"rules_editor_{problem_id}",
+    )
+    if st.button("Save rules JSON", type="primary", key=f"save_rules_{problem_id}"):
+        try:
+            updated_rules = json.loads(edited_rules)
+            if not isinstance(updated_rules, dict) or not isinstance(updated_rules.get("metrics"), list):
+                raise ValueError("Rules must be an object containing a metrics list.")
+            updated_rules["problem"] = problem_id
+            total_weight = sum(float(metric.get("weight", 0)) for metric in updated_rules["metrics"])
+            if not updated_rules["metrics"] or abs(total_weight - 1.0) > 1e-4:
+                raise ValueError(f"Metric weights must total 1.00 (currently {total_weight:.2f}).")
+            rules_path.write_text(json.dumps(updated_rules, indent=2), encoding="utf-8")
+            st.success("Rules JSON saved.")
+            st.rerun()
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            st.error(f"Rules were not saved: {exc}")
+
+    st.markdown("#### Regenerate test cases")
+    count1, count2 = st.columns(2)
+    with count1:
+        io_count = st.number_input(
+            "I/O test case count", min_value=1, max_value=30,
+            value=max(1, min(30, io_rule_count)), step=1,
+            key=f"materials_io_count_{problem_id}",
+        )
+    with count2:
+        edge_count = st.number_input(
+            "Edge case count", min_value=1, max_value=20,
+            value=max(1, min(20, len(edge_files) or 5)), step=1,
+            key=f"materials_edge_count_{problem_id}",
+        )
+    if st.button("Regenerate I/O and edge cases from oracle", key=f"regen_tests_{problem_id}"):
+        if not oracle_path.is_file():
+            st.error("Save an oracle.c file before regenerating tests.")
+        else:
+            for metric in rules_data.get("metrics", []):
+                if metric.get("analyzer") == "io_tests":
+                    metric.setdefault("params", {})["num_generated_tests"] = int(io_count)
+            rules_path.write_text(json.dumps(rules_data, indent=2), encoding="utf-8")
+            try:
+                with st.spinner("Generating tests from the saved oracle..."):
+                    generated = generate_all_test_cases(
+                        problem_id,
+                        tests_dir=str(tests_dir),
+                        oracle_path=str(oracle_path),
+                        sample_input=str(rules_data.get("smoke_input", "")),
+                        problem_description=assignment["description"] or "",
+                        num_io=int(io_count),
+                        num_edge=int(edge_count),
+                        force_regenerate=True,
+                    )
+                st.success(
+                    f"Generated {generated.get('io_count', 0)} I/O and "
+                    f"{generated.get('edge_count', 0)} edge cases."
+                )
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Test generation failed: {exc}")
+
+    def edit_case_files(case_files, category: str, heading: str) -> None:
+        st.markdown(f"#### {heading}")
+        if not case_files:
+            st.info("No test cases found.")
+            return
+        for input_path in case_files:
+            case_name = input_path.stem
+            output_path = input_path.with_suffix(".out")
+            with st.expander(case_name):
+                left, right = st.columns(2)
+                input_value = input_path.read_text(encoding="utf-8", errors="replace")
+                output_value = output_path.read_text(encoding="utf-8", errors="replace") if output_path.is_file() else ""
+                with left:
+                    edited_input = st.text_area(
+                        "Standard input (.in)", value=input_value, height=150,
+                        key=f"case_in_{problem_id}_{category}_{case_name}",
+                    )
+                with right:
+                    edited_output = st.text_area(
+                        "Expected output (.out)", value=output_value, height=150,
+                        key=f"case_out_{problem_id}_{category}_{case_name}",
+                    )
+                if st.button(
+                    f"Save {case_name}",
+                    key=f"save_case_{problem_id}_{category}_{case_name}",
+                ):
+                    input_path.write_text(edited_input, encoding="utf-8")
+                    output_path.write_text(edited_output, encoding="utf-8")
+                    st.success(f"{case_name} input and expected output saved.")
+                    st.rerun()
+
+    st.markdown("#### Generated and editable test cases")
+    io_files = sorted((tests_dir / "auto_generated").glob("gen_*.in"))
+    if not io_files:
+        io_files = sorted(tests_dir.glob("*.in"))
+    edit_case_files(io_files, "io", "Standard I/O cases")
+    edit_case_files(edge_files, "edge", "Adversarial edge cases")
+
+
+def teacher_view() -> None:
+    user = st.session_state["portal_user"]
+    st.sidebar.title("C-Grade")
+    st.sidebar.caption("Teacher workspace")
+    section = st.sidebar.radio(
+        "Workspace",
+        ["Overview", "Students", "Assignments", "Grading"],
+    )
+    if st.sidebar.button("Sign out", width="stretch"):
+        st.session_state.pop("portal_user", None)
+        st.rerun()
+
+    assignments = database.list_assignments()
+    if section == "Overview":
+        st.markdown('<p class="portal-kicker">Teacher workspace</p>', unsafe_allow_html=True)
+        st.title("Course overview")
+        submitted = sum(len(database.list_assignment_submissions(a["id"])) for a in assignments)
+        columns = st.columns(3)
+        columns[0].metric("Students", database.count_students())
+        columns[1].metric("Assignments", len(assignments))
+        columns[2].metric("Submissions", submitted)
+        st.markdown("### Recent assignments")
+        if assignments:
+            st.dataframe(
+                [{"Assignment": a["title"], "Problem slug": a["problem_id"],
+                  "Due": a["due_date"] or "No deadline"} for a in assignments[:8]],
+                                width="stretch", hide_index=True,
+            )
+        else:
+            st.info("Create an assignment to get started.")
+
+    elif section == "Students":
+        st.markdown('<p class="portal-kicker">Roster management</p>', unsafe_allow_html=True)
+        st.title("Students")
+        with st.expander("Import students from CSV", expanded=True):
+            st.caption("Required headers: roll_no,name. New students receive the initial password 123.")
+            upload = st.file_uploader("Student roster", type=["csv"])
+            if upload and st.button("Import roster", type="primary"):
+                try:
+                    result = database.import_students_csv(upload.getvalue().decode("utf-8-sig"))
+                    st.success(f"{result['inserted']} students imported successfully.")
+                    if result["duplicates"] or result["invalid"]:
+                        st.warning(f"Skipped {result['duplicates']} duplicate(s) and {result['invalid']} incomplete row(s).")
+                    st.rerun()
+                except (UnicodeDecodeError, ValueError, csv.Error) as exc:
+                    st.error(f"CSV format error: {exc}")
+        students = database.list_students()
+        st.dataframe(
+            [{"Roll number": s["roll_no"], "Student": s["name"], "Joined": s["created_at"]}
+             for s in students],
+            width="stretch", hide_index=True,
+        )
+        if students:
+            students_by_id = {student["id"]: student for student in students}
+            st.markdown("### Edit student details")
+            edit_id = st.selectbox(
+                "Student to edit", list(students_by_id),
+                format_func=lambda student_id: (
+                    f"{students_by_id[student_id]['name']} · "
+                    f"{students_by_id[student_id]['roll_no']}"
+                ),
+                key="edit_student_id",
+            )
+            selected_student = students_by_id[edit_id]
+            with st.form(f"edit_student_form_{edit_id}"):
+                updated_roll_no = st.text_input(
+                    "Roll number", value=selected_student["roll_no"]
+                )
+                updated_name = st.text_input(
+                    "Student name", value=selected_student["name"]
+                )
+                save_student = st.form_submit_button("Save student changes", type="primary")
+            if save_student:
+                if not updated_roll_no.strip() or not updated_name.strip():
+                    st.error("Roll number and student name are required.")
+                else:
+                    try:
+                        if database.update_student_details(edit_id, updated_roll_no, updated_name):
+                            st.success("Student details updated.")
+                            st.rerun()
+                        st.error("Student record was not found.")
+                    except sqlite3.IntegrityError:
+                        st.error("That roll number is already assigned to another student.")
+
+            with st.expander("Delete a student"):
+                delete_id = st.selectbox(
+                    "Student to delete", list(students_by_id),
+                    format_func=lambda student_id: (
+                        f"{students_by_id[student_id]['name']} · "
+                        f"{students_by_id[student_id]['roll_no']}"
+                    ),
+                    key="delete_student_id",
+                )
+                delete_student = students_by_id[delete_id]
+                st.warning(
+                    f"Deleting {delete_student['name']} will also permanently delete "
+                    "their submissions and evaluation reports."
+                )
+                confirm_delete = st.checkbox(
+                    "I understand and want to delete this student",
+                    key=f"confirm_delete_student_{delete_id}",
+                )
+                if st.button(
+                    "Delete student and submissions",
+                    type="secondary",
+                    disabled=not confirm_delete,
+                    key=f"delete_student_{delete_id}",
+                ):
+                    if database.delete_student(delete_id):
+                        st.success("Student and related submissions deleted.")
+                        st.rerun()
+                    st.error("Student record was not found.")
+
+    elif section == "Assignments":
+        st.markdown('<p class="portal-kicker">Course setup</p>', unsafe_allow_html=True)
+        st.title("Assignment workspace")
+        new_tab, edit_tab = st.tabs(["New assignment", "Edit assignment"])
+        with new_tab:
+            new_assignment_view(assignments)
+        with edit_tab:
+            assignment_materials_view(assignments)
+
+    else:
+        st.markdown('<p class="portal-kicker">Review and feedback</p>', unsafe_allow_html=True)
+        st.title("Assignment grading")
+        if not assignments:
+            st.info("There are no assignments to review.")
+            return
+        labels = {a["id"]: a["title"] for a in assignments}
+        assignment_id = st.selectbox("Assignment", list(labels), format_func=labels.get)
+        submissions = database.list_assignment_submissions(assignment_id)
+        total_students = database.count_students()
+        graded_count = sum(row["status"] == "graded" for row in submissions)
+        a, b, c = st.columns(3)
+        a.metric("Assigned students", total_students)
+        b.metric("Submitted", len(submissions))
+        c.metric("Graded", graded_count)
+        st.dataframe(
+            [{"Student": r["name"], "Roll no": r["roll_no"], "Submitted": r["submitted_at"],
+              "Score": f"{r['score'] * 100:.1f}%" if r["score"] is not None else "Pending",
+              "Status": r["status"].title(),
+              "I/O status": evaluation_status(r["io_score"]),
+              "Sanitizer status": evaluation_status(r["sanitizer_score"])}
+             for r in submissions], width="stretch", hide_index=True,
+        )
+        if submissions:
+            by_id = {r["submission_id"]: r for r in submissions}
+            selected = st.selectbox(
+                "Submission details", list(by_id),
+                format_func=lambda value: f"{by_id[value]['name']} · {by_id[value]['roll_no']}",
+            )
+            record = by_id[selected]
+            st.markdown(f"#### {record['name']} / {record['roll_no']}")
+            st.caption(f"Submitted {record['submitted_at']}")
+            st.code(record["submitted_code"], language="c")
+            raw_report = json.loads(record["raw_evidence_json"] or "{}")
+            show_report(raw_report, record["score"], record["io_score"],
+                        record["quality_score"], record["sanitizer_score"],
+                        record["feedback_summary"], include_private=True,
+                        student_name=record["name"], roll_no=record["roll_no"],
+                        assignment_title=labels[assignment_id],
+                        submitted_at=record["submitted_at"],
+                        submitted_code=record["submitted_code"])
+
+
+def student_view() -> None:
+    user = st.session_state["portal_user"]
+    st.sidebar.title("C-Grade")
+    st.sidebar.caption(f"Student / {user['roll_no']}")
+    section = st.sidebar.radio("Workspace", ["Assignments", "Submit code", "Settings"])
+    if st.sidebar.button("Sign out", width="stretch"):
+        st.session_state.pop("portal_user", None)
+        st.rerun()
+
+    assignments = database.get_student_submissions(user["id"])
+    if section == "Assignments":
+        st.markdown('<p class="portal-kicker">Student workspace</p>', unsafe_allow_html=True)
+        st.title(f"Hello, {user['name']}")
+        st.write("Your assignments and latest submission results.")
+        rows = []
+        for assignment in assignments:
+            status = assignment["submission_status"] or "Not Submitted"
+            deadline, _ = assignment_deadline(assignment["due_date"])
+            rows.append({"Assignment": assignment["title"], "Due": assignment["due_date"] or "No deadline",
+                         "Deadline": deadline, "Status": status.title(),
+                         "Score": f"{assignment['score'] * 100:.1f}%" if assignment["score"] is not None else "—"})
+        if rows:
+            st.dataframe(rows, width="stretch", hide_index=True)
+        else:
+            st.info("No assignments have been published yet.")
+        graded = [row for row in assignments if row["raw_evidence_json"]]
+        if graded:
+            graded_by_id = {row["id"]: row for row in graded}
+            selected_id = st.selectbox(
+                "View an evaluation", list(graded_by_id),
+                format_func=lambda item_id: graded_by_id[item_id]["title"],
+            )
+            selected = graded_by_id[selected_id]
+            raw_report = json.loads(selected["raw_evidence_json"] or "{}")
+            st.markdown(f"### {selected['title']}")
+            show_report(raw_report, selected["score"], selected["io_score"],
+                        selected["quality_score"], selected["sanitizer_score"],
+                        selected["feedback_summary"],
+                        student_name=user["name"], roll_no=user["roll_no"],
+                        assignment_title=selected["title"],
+                        submitted_at=selected["submitted_at"],
+                        submitted_code=selected["submitted_code"])
+
+    elif section == "Submit code":
+        st.markdown('<p class="portal-kicker">Assessment submission</p>', unsafe_allow_html=True)
+        st.title("Submit C code")
+        if not assignments:
+            st.info("No assignments are available yet.")
+            return
+        labels = {item["id"]: item["title"] for item in assignments}
+        assignment_id = st.selectbox("Assignment", list(labels), format_func=labels.get)
+        assignment = database.get_assignment(assignment_id)
+        prior = next((item for item in assignments if item["id"] == assignment_id), None)
+        if prior and prior["submission_id"]:
+            st.warning("One submission is allowed for this problem. Resubmission is disabled.")
+            if prior["submitted_code"]:
+                st.code(prior["submitted_code"], language="c")
+            if prior["raw_evidence_json"]:
+                prior_report = json.loads(prior["raw_evidence_json"])
+                show_report(
+                    prior_report, prior["score"], prior["io_score"],
+                    prior["quality_score"], prior["sanitizer_score"],
+                    prior["feedback_summary"], student_name=user["name"],
+                    roll_no=user["roll_no"], assignment_title=assignment["title"],
+                    submitted_at=prior["submitted_at"], submitted_code=prior["submitted_code"],
+                )
+            return
+
+        deadline_label, deadline_closed = assignment_deadline(assignment["due_date"])
+        if deadline_closed:
+            st.error(f"This assignment closed on {str(assignment['due_date'])[:10]}; submissions are no longer accepted.")
+            return
+        st.info(f"Deadline: {deadline_label}{' · ' + str(assignment['due_date'])[:10] if assignment['due_date'] else ''}")
+        st.write(assignment["description"] or "No additional assignment details.")
+        upload = st.file_uploader("Upload a .c file", type=["c"])
+        code = st.text_area("Or paste your C source", height=300, placeholder="#include <stdio.h>\nint main(void) {\n    return 0;\n}")
+        source = upload.getvalue().decode("utf-8", errors="replace") if upload else code
+        if st.button("Submit code once", type="primary", disabled=not source.strip()):
+            if len(source.encode("utf-8")) > 200_000:
+                st.error("Source files must be smaller than 200 KB.")
+                return
+            rules_path = ROOT / "rules" / f"{assignment['problem_id']}_rules.json"
+            if not rules_path.is_file():
+                st.error("The grading rules for this assignment are unavailable.")
+                return
+            source_dir = ROOT / "submissions" / assignment["problem_id"] / "portal"
+            source_dir.mkdir(parents=True, exist_ok=True)
+            source_path = source_dir / f"student_{user['id']}_{uuid.uuid4().hex}.c"
+            try:
+                submission_id = database.create_submission(assignment_id, user["id"], source)
+            except sqlite3.IntegrityError:
+                st.warning("Your submission has already been recorded. Resubmission is disabled.")
+                st.rerun()
+            try:
+                source_path.write_text(source, encoding="utf-8")
+                with st.spinner("Compiling and evaluating your one allowed submission..."):
+                    from agent import grade
+                    report = grade(str(source_path), str(rules_path))
+                    result = evaluation_record(report)
+                    database.complete_submission(submission_id, result["status"], result)
+                if result["status"] == "graded":
+                    st.success("Your one submission has been evaluated and saved.")
+                else:
+                    st.warning("Submission saved, but it did not compile. Resubmission is disabled.")
+                show_report(report, result["score"], result["io_score"],
+                            result["quality_score"], result["sanitizer_score"],
+                            result["feedback_summary"],
+                            student_name=user["name"], roll_no=user["roll_no"],
+                            assignment_title=assignment["title"], submitted_code=source)
+            except Exception as exc:
+                failure = {
+                    "grade": 0,
+                    "problem": assignment["problem_id"],
+                    "first_pass": {"compiled": False, "error": str(exc)},
+                    "metrics": [],
+                    "suggestions": [f"Evaluation failed: {type(exc).__name__}: {exc}"],
+                }
+                result = evaluation_record(failure)
+                result["status"] = "failed"
+                database.complete_submission(submission_id, "failed", result)
+                st.error(f"Evaluation failed. The attempt is recorded and resubmission is disabled: {exc}")
+                show_report(failure, result["score"], result["io_score"],
+                            result["quality_score"], result["sanitizer_score"],
+                            result["feedback_summary"], student_name=user["name"],
+                            roll_no=user["roll_no"], assignment_title=assignment["title"],
+                            submitted_code=source)
+            finally:
+                source_path.unlink(missing_ok=True)
+
+    else:
+        st.markdown('<p class="portal-kicker">Account security</p>', unsafe_allow_html=True)
+        st.title("Change password")
+        student = database.get_student_by_id(user["id"])
+        if student and student["password_hash"] == database.DEFAULT_PASSWORD_HASH:
+            st.warning("You are using the initial password. Set a new password now.")
+        with st.form("change_password_form"):
+            current = st.text_input("Current password", type="password")
+            new = st.text_input("New password", type="password")
+            confirm = st.text_input("Confirm new password", type="password")
+            changed = st.form_submit_button("Update password", type="primary")
+        if changed:
+            if len(new) < 8:
+                st.error("New password must be at least 8 characters.")
+            elif new != confirm:
+                st.error("The new passwords do not match.")
+            elif not auth.change_student_password(user["id"], current, new):
+                st.error("Current password is incorrect.")
+            else:
+                st.success("Password changed successfully.")
+
+
+if "portal_user" not in st.session_state:
+    login_screen()
+elif st.session_state["portal_user"]["role"] == "teacher":
+    teacher_view()
+else:
+    student_view()

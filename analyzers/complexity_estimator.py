@@ -94,7 +94,15 @@ def infer_measurement_boundary(source: str) -> dict:
     masked=_mask_comments_strings(source)
     call=_input_call(masked)
     if call is None:
-        return {"supported":False,"reason":"No supported standard input call was found."}
+        main_match = re.search(r'\bmain\s*\([^)]*\)\s*\{', masked)
+        if main_match:
+            return {
+                "supported": True,
+                "offset": main_match.end(),
+                "mode": "main_entry_no_stdin",
+                "reason": "No stdin read was found; count begins at main entry for a fixed-input program.",
+            }
+        return {"supported":False,"reason":"No supported standard input call or main() function was found."}
     call_start,call_end=call
     loops=[]
     for m in re.finditer(r'\b(for|while)\s*\(',masked):
@@ -601,39 +609,41 @@ def _compatibility_error(message: str) -> dict:
     }
 
 
-def _complexity_rank(complexity):
-    """Return the asymptotic growth rank of a generic complexity class."""
+def _complexity_rank(label: str):
+    """Compare predefined complexity candidates by asymptotic growth."""
+
+    value = (label or "").strip().lower().replace(" ", "")
+    value = value.replace("n", "N").replace("N", "n")
 
     ranks = {
-        "O(1)": 1,
-        "Constant": 1,
+        "o(1)": (0, 0),
 
-        "O(log N)": 2,
-        "Logarithmic": 2,
+        "o(logn)": (1, 0),
 
-        "O(N)": 3,
-        "O(N^2)": 3,
-        "O(N^3)": 3,
-        "Polynomial": 3,
+        "o(n)": (2, 1),
+        "o(n^2)": (2, 2),
+        "o(n^3)": (2, 3),
 
-        "O(N log N)": 4,
-        "O(N^2 log N)": 4,
-        "Polynomial-logarithmic": 4,
+        "o(nlogn)": (3, 1),
+        "o(n^2logn)": (3, 2),
 
-        "O(c^N)": 5,
-        "Exponential": 5,
+        "o(1.5^n)": (4, 1.5),
+        "o(2^n)": (4, 2),
+        "o(3^n)": (4, 3),
 
-        "O(N^k * c^N)": 6,
-        "Exponential-polynomial": 6,
+        "o(n^1*1.5^n)": (5, 1.5),
+        "o(n^2*1.5^n)": (5, 1.5),
+        "o(n^1*2^n)": (5, 2),
+        "o(n^2*2^n)": (5, 2),
+        "o(n^1*3^n)": (5, 3),
+        "o(n^2*3^n)": (5, 3),
 
-        "O(N!)": 7,
-        "Factorial": 7,
-
-        "O(N^k * N!)": 8,
-        "Factorial-polynomial": 8,
+        "o(n!)": (6, 1),
+        "o(n^1*n!)": (7, 1),
+        "o(n^2*n!)": (7, 2),
     }
 
-    return ranks.get(complexity)
+    return ranks.get(value)
 
 
 def evaluate(source_path: str, binary_path: str, params: dict, limits: dict = None) -> dict:
@@ -674,9 +684,7 @@ def evaluate(source_path: str, binary_path: str, params: dict, limits: dict = No
     fit = result.get('fit', {'complexity': 'inconclusive', 'confidence': 'low'})
     detected = fit.get('complexity', 'inconclusive')
     expected = params.get('expected_complexity', 'O(N)')
-    detected_rank = _complexity_rank(
-    fit.get("generic_family", "Inconclusive")
-    ) 
+    detected_rank = _complexity_rank(detected)
     expected_rank = _complexity_rank(expected)
 
     generic_family = fit.get('generic_family', 'Unclassified')
