@@ -1,116 +1,359 @@
+from __future__ import annotations
+
 import os
 import re
 import json
 import requests
+from typing import Any
 
-def _heuristic_readability_fallback(code: str) -> dict:
-    """
-    Deterministic static fallback if the local LLM server is unreachable.
-    Evaluates formatting, identifier names, and comment presence.
-    """
+
+# ---------------------------------------------------------------------------
+# Heuristic Fallback with Professional English Feedback
+# ---------------------------------------------------------------------------
+
+def _heuristic_readability_fallback(code: str, failure_reason: str = "") -> dict[str, Any]:
     lines = code.splitlines()
     non_empty = [l for l in lines if l.strip()]
-    if not non_empty:
-        return {"score": 0.0, "feedback": "Empty source file.", "reasons": ["No code present."]}
 
-    has_comments = bool(re.search(r"//|/\*", code))
-    short_vars = set(re.findall(r"\b(?:int|char|long|float|double)\s+([a-zA-Z])\b", code))
-    indented_lines = sum(1 for l in non_empty if l.startswith("    ") or l.startswith("\t"))
+    if not non_empty:
+        return {
+            "score": 0.0,
+            "feedback": (
+                "Summary: The submitted source file is empty.\n\n"
+                "How to Improve:\n"
+                "  - Provide a valid C implementation containing executable routines and logic."
+            ),
+            "evidence": {"reasons": ["No source code detected."]}
+        }
+
+    has_comments = bool(re.search(r"//|/\*[\s\S]*?\*/", code))
+
+    cryptic_vars = (
+        set(re.findall(
+            r"\b(?:int|char|long|float|double)\s+([a-zA-Z])\b",
+            code
+        )) - {"i", "j", "k", "n"}
+    )
+
+    indented_lines = sum(
+        1 for l in non_empty
+        if l.startswith("    ") or l.startswith("\t")
+    )
+
     indent_ratio = indented_lines / max(1, len(non_empty))
 
     score = 10.0
-    reasons = []
+    strengths: list[str] = []
+    improvements: list[str] = []
 
+    # Documentation assessment
     if not has_comments:
-        score -= 2.5
-        reasons.append("No explanatory comments provided.")
-    if short_vars:
-        score -= 2.5
-        reasons.append(f"Terse/single-letter variable names detected: {', '.join(sorted(short_vars))}.")
+        score -= 1.5
+        improvements.append(
+            "Documentation: Include concise function headers and inline comments explaining complex algorithm steps."
+        )
+    else:
+        strengths.append(
+            "Documentation: Appropriate comments and explanatory annotations are present."
+        )
+
+    # Identifier naming assessment
+    if cryptic_vars:
+        score -= 1.5
+        var_list = ", ".join(f"'{v}'" for v in sorted(cryptic_vars))
+        improvements.append(
+            f"Identifier Naming: Replace single-character identifiers ({var_list}) with self-documenting, descriptive names (e.g., 'primary_input', 'total_count')."
+        )
+    else:
+        strengths.append(
+            "Identifier Naming: Variable and function identifiers follow descriptive naming standards."
+        )
+
+    # Formatting assessment
     if indent_ratio < 0.3:
-        score -= 2.0
-        reasons.append("Inconsistent or cramped indentation formatting.")
+        score -= 1.5
+        improvements.append(
+            "Code Formatting: Standardize indentation across all blocks (prefer 4 spaces or 1 tab consistently) to improve structural hierarchy."
+        )
+    else:
+        strengths.append(
+            "Code Formatting: Clean vertical spacing and consistent block indentation maintained."
+        )
 
     score = max(0.0, min(10.0, score))
     normalized = round(score / 10.0, 2)
-    feedback = "; ".join(reasons) if reasons else "Clean structure, consistent indentation, and good formatting."
+
+    feedback_sections = [
+        "Summary: The code exhibits acceptable baseline structure, with opportunities to enhance technical documentation and readability."
+    ]
+
+    if strengths:
+        feedback_sections.append(
+            "Strengths:\n  - " + "\n  - ".join(strengths)
+        )
+
+    if improvements:
+        feedback_sections.append(
+            "Areas for Improvement:\n  - " + "\n  - ".join(improvements)
+        )
+    else:
+        feedback_sections.append(
+            "Areas for Improvement:\n  - Code structure fully adheres to professional readability standards."
+        )
 
     return {
         "score": normalized,
         "evidence": {
             "model_used": "deterministic-heuristic-fallback",
-            "raw_response": {"score": score, "reasons": reasons}
+            "fallback_trigger_reason": failure_reason,
+            "raw_response": {
+                "score": score,
+                "strengths": strengths,
+                "improvements": improvements
+            }
         },
-        "feedback": feedback
+        "feedback": "\n\n".join(feedback_sections)
     }
 
-def evaluate(source_path: str, binary_path: str, params: dict, limits: dict) -> dict:
-    model = params.get("model", "qwen3.5:2b")
-    temperature = params.get("temperature", 0)
-    seed = params.get("seed", 42)
+
+# ---------------------------------------------------------------------------
+# Helper: Extract Valid JSON Object
+# ---------------------------------------------------------------------------
+
+def _extract_json(raw_text: str) -> dict[str, Any] | None:
+    cleaned = raw_text.strip()
+
+    if not cleaned:
+        return None
+
+    if "```" in cleaned:
+        cleaned = re.sub(
+            r"^```[a-zA-Z]*\s*\n?",
+            "",
+            cleaned
+        )
+        cleaned = re.sub(
+            r"\n?```\s*$",
+            "",
+            cleaned
+        ).strip()
+
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            pass
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Main Analyzer Entry Point
+# ---------------------------------------------------------------------------
+
+def evaluate(
+    source_path: str,
+    binary_path: str = "",
+    params: dict | None = None,
+    limits: dict | None = None
+) -> dict[str, Any]:
+
+    params = params or {}
+    limits = limits or {}
+
+    model = str(params.get("model", "qwen3.5:2b"))
+    temperature = float(params.get("temperature", 0.1))
+    seed = int(params.get("seed", 42))
 
     if not os.path.exists(source_path):
         return {
             "score": 0.0,
-            "evidence": {"error": f"Source file not found: {source_path}"},
-            "feedback": "Evaluation failed: source file missing."
+            "evidence": {
+                "error": f"Source file not found: {source_path}"
+            },
+            "feedback": "Evaluation failed: The designated source file does not exist on disk."
         }
 
     with open(source_path, "r", encoding="utf-8", errors="ignore") as f:
         code_str = f.read()
 
+    # -----------------------------------------------------------------------
+    # Strict Professional Readability Evaluation Prompt
+    # -----------------------------------------------------------------------
+
     system_prompt = (
-        "You are an automated code quality reviewer for C programs. "
-        "Judge readability, meaningful naming, comments, and clean layout ONLY. "
-        "Do NOT check mathematical correctness or bugs. "
-        "Output strictly valid JSON: {\"score\": <integer 0-10>, \"reasons\": [\"<point 1>\", \"<point 2>\"]}"
+        "You are an objective C code readability evaluator. "
+        "Evaluate each submission independently. Do not assume that every submission "
+        "deserves a score between 7 and 9.\n\n"
+
+        "Evaluate ONLY these three dimensions:\n"
+
+        "1. Naming conventions (40%): Meaningful variable names, function names, "
+        "descriptive identifiers and consistent naming.\n"
+
+        "2. Formatting (40%): Consistent indentation, spacing, line organization, "
+        "braces, code layout and structural hierarchy.\n"
+
+        "3. Documentation (20%): Useful comments, function descriptions and "
+        "explanations of complex logic.\n\n"
+
+        "STRICT SCORING RUBRIC (0-10):\n"
+
+        "8.6-10.0: Good readability but some noticeable weaknesses.\n"
+
+        "7.0-8.5: Average readability with multiple improvement opportunities.\n"
+
+        "5.0-6.9: Poor readability with inconsistent formatting or weak naming.\n"
+
+        "IMPORTANT EVALUATION RULES:\n"
+
+        "- Evaluate each category independently using actual code evidence.\n"
+        "- Do not give high scores merely because code is functional or correct.\n"
+        "- Do not give identical scores to submissions with noticeably different readability.\n"
+        "- Reward genuinely consistent indentation and meaningful identifiers.\n"
+        "- Penalize missing documentation proportionately, not excessively.\n"
+        "- Do not penalize short programs merely for having fewer comments.\n"
+        "- Do not assess algorithmic complexity or mathematical correctness.\n"
+        "- Avoid default scores. Select scores based on observed evidence.\n\n"
+
+        "All feedback MUST use formal professional technical English.\n\n"
+
+        "Return ONLY a valid JSON object matching this schema:\n"
+
+        "{\n"
+        '  "naming": 8.5,\n'
+        '  "formatting": 9.0,\n'
+        '  "comments": 7.5,\n'
+        '  "summary": "Professional 1-2 sentence evaluation.",\n'
+        '  "strengths": ["Strength 1", "Strength 2"],\n'
+        '  "suggestions": ["Suggestion 1", "Suggestion 2"]\n'
+        "}"
     )
 
-    prompt = f"Evaluate this C code readability:\n\n```c\n{code_str}\n```"
+    prompt = (
+        "Perform a strict, evidence-based readability evaluation on this C code. "
+        "Assign scores independently for naming, formatting and comments. "
+        "Return the required JSON only:\n\n"
+        f"```c\n{code_str}\n```"
+    )
+
+    llm_err_msg = ""
 
     try:
         payload = {
             "model": model,
             "system": system_prompt,
             "prompt": prompt,
-            "format": "json",
             "stream": False,
             "think": False,
             "options": {
                 "temperature": temperature,
                 "seed": seed,
-                "num_predict": 256
+                "num_predict": 512,
             }
         }
-        res = requests.post("http://127.0.0.1:11434/api/generate", json=payload, timeout=45.0)
+
+        # Ollama API Request
+        res = requests.post(
+            "http://127.0.0.1:11434/api/generate",
+            json=payload,
+            timeout=120.0
+        )
 
         if res.status_code == 200:
-            raw_text = res.json().get("response", "").strip()
+            response_data = res.json()
+            raw_text = response_data.get("response", "").strip()
 
-            # Clean any Markdown code fences if the model emitted them
-            if "```" in raw_text:
-                raw_text = re.sub(r"^```[a-zA-Z]*\n?", "", raw_text)
-                raw_text = re.sub(r"\n?```$", "", raw_text).strip()
+            if not raw_text:
+                print(
+                    "OLLAMA DEBUG:",
+                    json.dumps(response_data, indent=2)
+                )
 
-            parsed = json.loads(raw_text)
+                raise ValueError(
+                    f"Ollama returned an empty response. "
+                    f"Model: {model}, "
+                    f"Done reason: {response_data.get('done_reason', 'unknown')}"
+                )
 
-            raw_score = float(parsed.get("score", 5))
-            raw_score = max(0.0, min(10.0, raw_score))
-            normalized_score = round(raw_score / 10.0, 2)
-            reasons = parsed.get("reasons", [])
-            feedback = "; ".join(reasons) if reasons else "Readability review completed."
+            parsed = _extract_json(raw_text)
+
+            if not parsed:
+                raise ValueError(
+                    f"Unable to parse structured JSON from model output: {raw_text[:120]}"
+                )
+
+            naming = float(parsed.get("naming", 7.0))
+            formatting = float(parsed.get("formatting", 7.0))
+            comments = float(parsed.get("comments", 5.0))
+
+            # Weighted scoring: Formatting 40%, Naming 40%, Comments 20%
+            weighted = (
+                formatting * 0.40
+                + naming * 0.40
+                + comments * 0.20
+            )
+
+            weighted = max(0.0, min(10.0, weighted))
+            normalized_score = round(weighted / 10.0, 2)
+
+            summary = parsed.get(
+                "summary",
+                "Readability evaluation completed."
+            )
+
+            strengths = parsed.get("strengths", [])
+            suggestions = parsed.get("suggestions", [])
+
+            # Professional feedback presentation
+            feedback_sections = [
+                f"Summary: {summary}"
+            ]
+
+            if strengths:
+                feedback_sections.append(
+                    "Key Strengths:\n  - "
+                    + "\n  - ".join(strengths)
+                )
+
+            if suggestions:
+                feedback_sections.append(
+                    "Actionable Improvements:\n  - "
+                    + "\n  - ".join(suggestions)
+                )
+            else:
+                feedback_sections.append(
+                    "Actionable Improvements:\n"
+                    "  - The implementation demonstrates clean code quality "
+                    "and complies with standard readability benchmarks."
+                )
+
+            formatted_feedback = "\n\n".join(feedback_sections)
 
             return {
                 "score": normalized_score,
                 "evidence": {
                     "model": model,
-                    "temperature": temperature,
-                    "seed": seed,
                     "raw_response": parsed
                 },
-                "feedback": feedback
+                "feedback": formatted_feedback
             }
-    except Exception:
-        pass
 
-    return _heuristic_readability_fallback(code_str)
+        else:
+            llm_err_msg = f"HTTP {res.status_code}: {res.text[:200]}"
+
+    except Exception as exc:
+        llm_err_msg = f"{type(exc).__name__}: {str(exc)}"
+
+    # Heuristic fallback
+    return _heuristic_readability_fallback(
+        code_str,
+        failure_reason=llm_err_msg
+    )

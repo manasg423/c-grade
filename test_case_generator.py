@@ -169,7 +169,7 @@ def generate_tests_with_llm(
         "if it finds a two-sum target, target must be achievable for positive cases; if it sorts an array, provide varied sequences).\n"
         "3. Synthesize:\n"
         "   - 'io_tests': typical, diverse, non-trivial test inputs representing valid problem instances across different sizes.\n"
-        "   - 'edge_cases': boundary, corner, and adversarial inputs (minimum size n=1, all identical elements, negative numbers, extreme values, or invalid inputs handled by code).\n"
+        "   - 'edge_cases': boundary, corner, and adversarial inputs (empty length inputs,single length inputs, all identical elements, negative numbers, extreme values, or invalid inputs handled by code).\n"
         "4. Return STRICTLY valid JSON with the schema:\n"
         "{\n"
         '  "io_tests": ["raw_stdin_string_1", "raw_stdin_string_2", ...],\n'

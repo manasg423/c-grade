@@ -39,7 +39,7 @@ from core.reporter import generate_report
 # Constants
 # ---------------------------------------------------------------------------
 
-MAX_WORKERS = 8          # Max parallel analyzer threads
+MAX_WORKERS = 9          # Max parallel analyzer threads
 EXECUTION_ANALYZERS = {  # These need a valid binary; skip on smoke-test fail
     "io_tests",
     "edge_case_runner",
