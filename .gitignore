@@ -10,6 +10,7 @@ rules/
 submissions/
 analyzer_test_runs/
 /tmp/
+.tmp/
 venv/
 .env
 portal.db
