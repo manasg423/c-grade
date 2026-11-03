@@ -46,6 +46,17 @@ def _models():
             models.append(("Exponential-polynomial", f"O(N^{k} * {c:g}^N)",
                            lambda n, c=c, k=k: k * math.log(n) + n * math.log(c)))
 
+    # Log-log growth is not part of the main polynomial-log family, but it is
+    # a common real benchmark shape (for example nested doubling loops). Keep
+    # a small explicit family so it is not forced into O(N) or O(N log N).
+    for k in range(0, 4):
+        label = "O(log log N)" if k == 0 else (
+            "O(N log log N)" if k == 1 else f"O(N^{k} log log N)"
+        )
+        models.append(("Polynomial-log-log", label,
+                       lambda n, k=k: k * math.log(n) +
+                       math.log(max(EPS, math.log(math.log(max(4.0, n)))))))
+
     # Factorial and polynomial-factorial families, evaluated via lgamma.
     models.append(("Factorial", "O(N!)", lambda n: math.lgamma(n + 1.0)))
     for k in (1, 2):
@@ -259,7 +270,18 @@ def _fit_growth_impl(measurements, config=None):
     resolution_limited_constant = _resolution_limited_constant(
         ns, ys, growth, selected_method, points
     )
-    if resolution_limited_constant and not poor_fit and not irregular:
+    constant_candidate = next((item for item in candidates
+                               if item["complexity"] == "O(1)"), None)
+    # A narrow raw range alone is not proof of constant time: a large fixed
+    # startup/IO cost can hide genuine logarithmic or square-root growth.
+    # Only apply the constant override when the constant model itself remains
+    # statistically competitive with the best growth model.
+    constant_is_competitive = (
+        constant_candidate is not None
+        and constant_candidate["bic"] - best["bic"] < 2.0
+    )
+    if (resolution_limited_constant and constant_is_competitive
+            and not poor_fit and not irregular):
         chosen = "O(1)"
         confidence = "medium"
         warnings.append("growth_below_instruction_count_resolution")
@@ -275,11 +297,14 @@ def _fit_growth_impl(measurements, config=None):
     constant_fit_error = math.sqrt(statistics.mean(
         ((constant_level - y) / y) ** 2 for y in ys
     ))
-    selected_fixed = constant_level if chosen == "O(1)" and resolution_limited_constant else best["fixed_cost"]
-    selected_scale = 0.0 if chosen == "O(1)" and resolution_limited_constant else best["scale"]
+    applied_constant_override = (
+        chosen == "O(1)" and resolution_limited_constant and constant_is_competitive
+    )
+    selected_fixed = constant_level if applied_constant_override else best["fixed_cost"]
+    selected_scale = 0.0 if applied_constant_override else best["scale"]
     selected_function = (
         f"{constant_level:.6g} (constant approximation)"
-        if chosen == "O(1)" and resolution_limited_constant
+        if applied_constant_override
         else f"{best['fixed_cost']:.6g} + {best['scale']:.6g} * {best['complexity']}"
     )
     result = {
@@ -291,13 +316,13 @@ def _fit_growth_impl(measurements, config=None):
         "model": "fixed_candidate", "model_family": "fixed_candidate",
         "parameters": {"fixed_cost": selected_fixed, "scale": selected_scale},
         "confidence": confidence,
-        "fit_error": round(constant_fit_error if chosen == "O(1)" and resolution_limited_constant else best["fit_error"], 8),
+        "fit_error": round(constant_fit_error if applied_constant_override else best["fit_error"], 8),
         "bic": round(best["bic"], 6),
         "model_selection": {"bic_gap_to_runner_up": None if gap is None else round(gap, 6),
                             "candidate_count": len(candidates), "ambiguous": ambiguous,
                             "classification_override": (
                                 "near_constant_instruction_trace"
-                                if resolution_limited_constant and chosen == "O(1)"
+                                if applied_constant_override
                                 else None
                             )},
         "cross_validation_log_error": None,
@@ -310,14 +335,20 @@ def _fit_growth_impl(measurements, config=None):
         "warnings": warnings, "original_valid_observation_count": len(points) + len(excluded),
         "measurement_method": selected_method, "raw_measurements": list(measurements or []),
         "observations_used": points,
-        "needs_more_measurements": bool(ambiguous or poor_fit or irregular) and not resolution_limited_constant,
+        # Low-confidence fits also trigger refinement. Previously a modest
+        # BIC gap (2..6) could produce confidence="low" while this flag stayed
+        # false, so the estimator never collected the larger N values needed
+        # to separate nearby families such as N log N vs N log^2 N.
+        "needs_more_measurements": bool(
+            ambiguous or poor_fit or irregular or confidence == "low"
+        ) and not applied_constant_override,
         "classification_basis": (
             "near_constant_instruction_trace"
-            if resolution_limited_constant and chosen == "O(1)"
+            if applied_constant_override
             else "best_candidate_model"
         ),
     }
-    if resolution_limited_constant and chosen == "O(1)":
+    if applied_constant_override:
         result["reason"] = (
             "Instruction counts vary by only a few percent across the tested range, "
             "with uniformly tiny local growth. O(1) is preferred over a negligible "

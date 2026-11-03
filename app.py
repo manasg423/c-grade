@@ -46,9 +46,10 @@ database.initialize_database()
 COMPLEXITY_OPTIONS = [
     "O(1)",
     "O(log N)",
-    "O(sqrt(N))",
+    "O(N^0.5)",
     "O(N)",
     "O(N log N)",
+    "O(N^2 log N)",
     "O(N^2)",
     "O(N^3)",
     "O(2^N)",
@@ -143,6 +144,18 @@ def assignment_deadline(due_value: str | None) -> tuple[str, bool]:
         return "Due today", False
     return "Open", False
 
+def first_sentence(text: str) -> str:
+    """Return feedback only up to the first full stop."""
+    text = re.sub(r"\s+", " ", str(text or "")).strip()
+
+    match = re.search(r"\.(?=\s|$)", text)
+
+    if match:
+        return text[:match.start() + 1]
+
+    return text
+
+
 
 def evaluation_record(report: dict) -> dict:
     first_pass = report.get("first_pass", {})
@@ -209,6 +222,7 @@ def build_text_grading_report(
                     raw_fb = summary_text
 
         fb = str(raw_fb or "").strip().replace("\n", " ")
+        fb = first_sentence(fb) 
 
         # Preserve the complete feedback; the report renderer wraps it to 32 columns.
         if is_student and any(k in name.lower() or k in analyzer.lower() for k in ("similarity", "originality", "plagiarism")):
@@ -328,7 +342,7 @@ def show_report(report: dict, score: float | None, io_score: float | None,
 
     if feedback:
         st.markdown("#### Feedback summary")
-        st.write(feedback)
+        st.write(first_sentence(feedback))
 
     st.markdown("#### Grading report")
     text_report = build_text_grading_report(

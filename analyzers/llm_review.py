@@ -231,7 +231,7 @@ def evaluate(
         '  "naming": 8.5,\n'
         '  "formatting": 9.0,\n'
         '  "comments": 7.5,\n'
-        '  "summary": "Professional 3-4 words  evaluation.",\n'
+        '  "summary": "Professional 3-4 words  evaluation."\n'
         "}"
     )
 
