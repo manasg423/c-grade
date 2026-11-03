@@ -247,7 +247,12 @@ if role == "👨‍🏫 Teacher Portal":
             problem_id = st.text_input("Problem Slug (e.g., add, str, sort, prime):").strip().lower()
             time_limit = st.number_input("Time Limit (seconds):", min_value=0.5, max_value=10.0, value=1.0, step=0.5)
             memory_limit = st.number_input("Memory Limit (MB):", min_value=16, max_value=512, value=64, step=16)
-            sample_input = st.text_input("Sample Smoke/Sanitizer Input:", value="10 20")
+            sample_input = st.text_area(
+                "Sample Smoke/Sanitizer Input:",
+                value="10 20",
+                height=150,
+                placeholder="Enter sample input here...\nExample:\n5\n10 20 30 40 50",
+            )
 
         with col2:
             input_type = st.selectbox(
@@ -498,10 +503,12 @@ if role == "👨‍🏫 Teacher Portal":
                     step=16,
                     key=f"e_mem_{sel}"
                 )
-                e_smoke = st.text_input(
+                e_smoke = st.text_area(
                     "Sample Smoke Input:",
                     value=str(rules_data.get("smoke_input", "10 20")),
-                    key=f"e_smoke_{sel}"
+                    height=150,
+                    key=f"e_smoke_{sel}",
+                    placeholder="Enter multiple lines of sample input..."
                 )
 
             with er_col2:
