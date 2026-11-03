@@ -151,7 +151,8 @@ def generate_tests_with_llm(
     problem_description: Optional[str] = None,
     num_io: int = 5,
     num_edge: int = 5,
-    model: str = DEFAULT_MODEL
+    model: str = DEFAULT_MODEL,
+    sample_output: Optional[str] = None,
 ) -> dict:
     """
     Autonomous LLM test case generator.
@@ -159,12 +160,15 @@ def generate_tests_with_llm(
     """
     system_prompt = (
         "You are an expert autonomous test case generator for C programming assignments. "
-        "Your task is to analyze ANY reference C implementation (oracle.c) and sample input, "
+        "Your task is to analyze ANY reference C implementation (oracle.c), optional problem description, "
+        "and sample input/output, "
         "and synthesize a rigorous, meaningful, and comprehensive test suite.\n\n"
         "Guidelines:\n"
         "1. Analyze main() and all input-reading calls (scanf, fgets, getchar, cin) alongside the sample input "
         "to deduce the EXACT standard input format (line breaks, number of tokens per line, types).\n"
-        "2. Understand the problem logic, preconditions, and invariants from the code and comments "
+        "2. When provided, use the problem description to understand intended behavior, constraints, and valid cases; "
+        "use the reference implementation and sample input/output to infer the concrete I/O contract. "
+        "Understand the problem logic, preconditions, and invariants from the code and comments "
         "(e.g. if the code assumes a majority element exists in an array of size n, every standard test case must have an element appearing > n/2 times; "
         "if it finds a two-sum target, target must be achievable for positive cases; if it sorts an array, provide varied sequences).\n"
         "3. Synthesize:\n"
@@ -178,6 +182,7 @@ def generate_tests_with_llm(
     )
 
     sample_sec = f"\nTeacher's Sample Input:\n```\n{sample_input}\n```\n" if sample_input else ""
+    output_sec = f"\nTeacher's Sample Output:\n```\n{sample_output}\n```\n" if sample_output else ""
     desc_sec = f"\nProblem Description:\n{problem_description}\n" if problem_description else ""
 
     io_results: list[str] = []
@@ -191,12 +196,14 @@ def generate_tests_with_llm(
 
     user_prompt = (
         f"Problem Identifier: {problem_id}\n"
-        f"{desc_sec}{sample_sec}\n"
+        f"{desc_sec}{sample_sec}{output_sec}\n"
         f"Reference Implementation (oracle.c):\n```c\n{oracle_code}\n```\n\n"
         f"Generate {needed_io} diverse 'io_tests' and {needed_edge} 'edge_cases'.\n"
         "CRITICAL RULES:\n"
         "- Each string MUST be the exact raw text to pipe to stdin, ending with newline '\\n'.\n"
-        "- Follow the exact input format demonstrated in the sample input and oracle.c.\n"
+        "- Use the sample input and sample output as examples of the input/output contract, together with oracle.c.\n"
+        "- When a problem description is provided, use it to guide expected behavior, constraints, and case validity.\n"
+        "- Treat the sample input and output only as references; do not copy or reproduce that exact sample case. Generate new inputs.\n"
         "- Ensure every io_test is valid, meaningful, and conforms to problem assumptions.\n"
         "- Produce fresh, distinct inputs with varied sizes and varied values."
     )
@@ -349,7 +356,8 @@ def generate_all_test_cases(
     problem_description: Optional[str] = None,
     num_io: int = 5,
     num_edge: int = 5,
-    force_regenerate: bool = True
+    force_regenerate: bool = True,
+    sample_output: Optional[str] = None,
 ) -> dict:
     """
     Universal test case generator.
@@ -374,14 +382,17 @@ def generate_all_test_cases(
         with open(oracle_path, "r", encoding="utf-8", errors="ignore") as f:
             oracle_code = f.read()
 
-    # If sample_input not passed, attempt reading from rules JSON in problems/<problem>/
-    if not sample_input:
+    # Fill missing sample values from the assignment rules.
+    if not sample_input or sample_output is None:
         rules_file = os.path.join("problems", problem_id, f"{problem_id}_rules.json")
         if os.path.isfile(rules_file):
             try:
                 with open(rules_file, "r", encoding="utf-8") as rf:
                     r_data = json.load(rf)
-                    sample_input = r_data.get("smoke_input", "")
+                    if not sample_input:
+                        sample_input = r_data.get("smoke_input", "")
+                    if sample_output is None:
+                        sample_output = r_data.get("sample_output", "")
             except Exception:
                 pass
 
@@ -399,6 +410,7 @@ def generate_all_test_cases(
             problem_id=problem_id,
             oracle_code=oracle_code,
             sample_input=sample_input,
+            sample_output=sample_output,
             problem_description=problem_description,
             num_io=num_io,
             num_edge=num_edge,
@@ -516,6 +528,7 @@ if __name__ == "__main__":
     parser.add_argument("--oracle", "-o", default=None, help="Path to reference oracle.c")
     parser.add_argument("--tests-dir", "-t", default=None, help="Destination tests directory")
     parser.add_argument("--sample", "-s", default=None, help="Sample smoke input string")
+    parser.add_argument("--sample-output", default=None, help="Teacher sample output string")
     parser.add_argument("--desc", "-d", default=None, help="Optional problem description / requirements")
     parser.add_argument("--num-io", type=int, default=5, help="Number of standard I/O test cases to generate")
     parser.add_argument("--num-edge", type=int, default=5, help="Number of adversarial edge cases to generate")
@@ -528,6 +541,7 @@ if __name__ == "__main__":
         tests_dir=args.tests_dir,
         oracle_path=args.oracle,
         sample_input=args.sample,
+        sample_output=args.sample_output,
         problem_description=args.desc,
         num_io=args.num_io,
         num_edge=args.num_edge,

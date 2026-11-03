@@ -510,6 +510,12 @@ def new_assignment_view(assignments) -> None:
                 height=80,
                 key=f"new_assignment_sample_{form_version}",
             )
+            sample_output = st.text_area(
+                "Sample output",
+                value=saved_form.get("sample_output", "30"),
+                height=80,
+                key=f"new_assignment_sample_output_{form_version}",
+            )
         with col2:
             expected_complexity = st.selectbox(
                 "Expected asymptotic complexity",
@@ -580,6 +586,7 @@ int main() {
             time_limit=time_limit,
             memory_limit=memory_limit,
             sample_input=sample_input,
+            sample_output=sample_output,
             input_type="integer_array",
             expected_complexity=expected_complexity,
             auto_gen_count=auto_gen_count,
@@ -628,6 +635,7 @@ int main() {
                 tests_dir=str(tests_dir),
                 oracle_path=str(oracle_path),
                 sample_input=sample_input,
+                sample_output=sample_output,
                 problem_description=description,
                 num_io=int(auto_gen_count),
                 num_edge=5,
@@ -771,6 +779,12 @@ def assignment_materials_view(assignments) -> None:
                 height=120,
                 key=f"edit_smoke_{problem_id}",
             )
+            edited_sample_output = st.text_area(
+                "Sample output",
+                value=str(rules_data.get("sample_output", "")),
+                height=120,
+                key=f"edit_sample_output_{problem_id}",
+            )
             edited_io_count = st.number_input(
                 "Generated I/O count", min_value=1, max_value=30,
                 value=max(1, min(30, io_rule_count)), step=1,
@@ -799,6 +813,7 @@ def assignment_materials_view(assignments) -> None:
             rules_data["time_limit_s"] = float(edited_time)
             rules_data["memory_limit_mb"] = int(edited_memory)
             rules_data["smoke_input"] = edited_smoke
+            rules_data["sample_output"] = edited_sample_output
             for metric in rules_data.get("metrics", []):
                 if metric.get("analyzer") == "io_tests":
                     metric.setdefault("params", {})["num_generated_tests"] = int(edited_io_count)
@@ -817,6 +832,7 @@ def assignment_materials_view(assignments) -> None:
                             tests_dir=str(tests_dir),
                             oracle_path=str(oracle_path),
                             sample_input=edited_smoke,
+                            sample_output=edited_sample_output,
                             problem_description=assignment["description"] or "",
                             num_io=int(edited_io_count),
                             num_edge=int(edited_edge_count),
