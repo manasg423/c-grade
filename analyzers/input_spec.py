@@ -265,32 +265,99 @@ def _source_stdin_variables(source: str) -> set[str]:
     return {item["variable"] for item in _source_stdin_reads(source)}
 
 
+def _strip_c_initializer(declarator: str) -> str:
+    """Remove a declarator initializer at top level, preserving nested '='."""
+    paren = bracket = brace = 0
+    quote = None
+    i = 0
+    while i < len(declarator):
+        ch = declarator[i]
+        if quote:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+        elif ch in ('"', "'"):
+            quote = ch
+        elif ch == "(":
+            paren += 1
+        elif ch == ")":
+            paren = max(0, paren - 1)
+        elif ch == "[":
+            bracket += 1
+        elif ch == "]":
+            bracket = max(0, bracket - 1)
+        elif ch == "{":
+            brace += 1
+        elif ch == "}":
+            brace = max(0, brace - 1)
+        elif ch == "=" and paren == bracket == brace == 0:
+            prev_ch = declarator[i - 1] if i else ""
+            next_ch = declarator[i + 1] if i + 1 < len(declarator) else ""
+            if prev_ch not in "=!<>" and next_ch != "=":
+                return declarator[:i].strip()
+        i += 1
+    return declarator.strip()
+
+
+def _find_c_declaration(source: str, variable: str,
+                        before: Optional[int] = None) -> Optional[dict]:
+    """Find a simple C declaration for *variable*, including shared declarations.
+
+    Handles declarations such as ``int a, b`` and ``char *s, *t``.  The
+    declarators are split with the same nesting/quote-aware routine used for
+    function arguments, so commas in initializers do not create fake variables.
+    This is deliberately conservative: unsupported declarators return None.
+    """
+    code = _c_code_without_comments(source)
+    limit = before if isinstance(before, int) and 0 <= before <= len(code) else len(code)
+    type_pattern = re.compile(
+        r"\b(?:(?:const|volatile|static|register|auto|extern)\s+)*"
+        r"(unsigned\s+long\s+long|long\s+long|unsigned\s+long|"
+        r"unsigned\s+int|unsigned\s+short|signed\s+char|unsigned\s+char|"
+        r"size_t|long|short|int|char|float|double)\s+([^;{}]+);"
+    )
+    matches = list(type_pattern.finditer(code[:limit]))
+    # Nearest declaration wins, avoiding earlier function parameters/local names.
+    for match in reversed(matches):
+        base_type = re.sub(r"\s+", " ", match.group(1)).strip()
+        for declarator in _split_c_arguments(match.group(2)):
+            # Remove only a top-level initializer; comparisons inside array
+            # bounds or nested initializer expressions remain untouched.
+            candidate = _strip_c_initializer(declarator)
+            dm = re.fullmatch(
+                r"\s*(\*+\s*)?" + re.escape(variable) +
+                r"\s*(?:\[\s*([^\]]*)\s*\])?\s*",
+                candidate,
+            )
+            if dm:
+                capacity = dm.group(2)
+                return {
+                    "base_type": base_type,
+                    "pointer": bool(dm.group(1)),
+                    "capacity": capacity.strip() if capacity is not None else None,
+                    "declaration_offset": match.start(),
+                }
+    return None
+
+
 def _infer_source_field(source: str, read: dict) -> tuple[dict, dict]:
     """Infer a conservative field/plan for a direct stdin destination."""
     variable = read["variable"]
-    code = _c_code_without_comments(source)
-    declaration_pattern = re.compile(
-        r"\b(char|unsigned\s+char|signed\s+char|short|unsigned\s+short|"
-        r"int|unsigned\s+int|long\s+long|unsigned\s+long\s+long|"
-        r"long|unsigned\s+long|float|double|size_t)\s*(\*+\s*)?"
-        + re.escape(variable) + r"\s*(?:\[\s*(\d*)\s*\])?"
-    )
-    # A name may also occur as a function parameter (e.g. generate(char s[])
-    # before main declares char s[100]). Prefer the nearest declaration before
-    # this stdin read rather than the first textual occurrence in the file.
     read_offset = read.get("source_offset")
-    if isinstance(read_offset, int):
-        preceding = list(declaration_pattern.finditer(code[:read_offset]))
-        decl = preceding[-1] if preceding else declaration_pattern.search(code)
-    else:
-        decl = declaration_pattern.search(code)
-    if not decl:
+    decl = _find_c_declaration(source, variable, read_offset)
+    if decl is None:
+        # A declaration after the read offset can occur in unusual source
+        # layouts; retain a conservative whole-file fallback.
+        decl = _find_c_declaration(source, variable)
+    if decl is None:
         raise ValueError(
             f"Cannot safely infer stdin field {variable!r} from its C declaration; "
             "the input analysis must describe it explicitly."
         )
-    base_type = re.sub(r"\s+", " ", decl.group(1)).strip()
-    pointer, capacity = bool(decl.group(2)), decl.group(3)
+    base_type = decl["base_type"]
+    pointer, capacity = decl["pointer"], decl["capacity"]
     expr, conv = read.get("expression", variable), read.get("conversion")
     indexed = "[" in expr
     is_char = "char" in base_type
@@ -357,17 +424,7 @@ def _normalize_schema_against_source(spec: dict, source: str) -> None:
     code = _c_code_without_comments(source)
 
     def declaration_for(variable: str, before: Optional[int] = None):
-        pattern = re.compile(
-            r"\b(char|unsigned\s+char|signed\s+char|short|unsigned\s+short|"
-            r"int|unsigned\s+int|long\s+long|unsigned\s+long\s+long|"
-            r"long|unsigned\s+long|float|double|size_t)\s*(\*+\s*)?"
-            + re.escape(variable) + r"\s*(?:\[\s*(\d*)\s*\])?"
-        )
-        segment = code[:before] if isinstance(before, int) else code
-        matches = list(pattern.finditer(segment))
-        if not matches and isinstance(before, int):
-            matches = list(pattern.finditer(code))
-        return matches[-1] if matches else None
+        return _find_c_declaration(source, variable, before)
 
     # First reconcile every directly recognized read.
     for read in reads:
@@ -399,8 +456,8 @@ def _normalize_schema_against_source(spec: dict, source: str) -> None:
         decl = declaration_for(variable, read.get("source_offset") if read else None)
         if not decl:
             continue
-        base_type = re.sub(r"\s+", " ", decl.group(1)).strip()
-        pointer, capacity = bool(decl.group(2)), decl.group(3)
+        base_type = decl["base_type"]
+        pointer, capacity = decl["pointer"], decl["capacity"]
         if "char" not in base_type or not (pointer or capacity is not None):
             continue
         declared_type = base_type + (" *" if pointer else "")
@@ -433,6 +490,45 @@ def _normalize_schema_against_source(spec: dict, source: str) -> None:
         collection.sort(key=lambda item: int(item.get("position", 0)))
     input_info["fields"] = fields
     generation["fields"] = plan
+
+    # Preserve the requested N for ordinary size parameters and allocation
+    # dimensions. Prime mapping is reserved for source that resembles a
+    # primality test; otherwise nearby requests can collapse to the same value.
+    dimension = analysis.get("profiling_dimension", {})
+    parameters = dimension.get("parameters", []) if isinstance(dimension, dict) else []
+    primary = str(parameters[0].get("variable", "")) if parameters and isinstance(parameters[0], dict) else ""
+    code = _c_code_without_comments(source)
+    if primary:
+        allocates_by_dimension = bool(re.search(
+            r"\b(?:malloc|calloc|realloc)\s*\([^;]{0,160}\b" + re.escape(primary) + r"\b", code))
+        primality_pattern = bool(
+            re.search(r"%\s*[A-Za-z_]\w*", code) and
+            re.search(r"(?:sqrt\s*\(\s*" + re.escape(primary) + r"\s*\)|"
+                      r"[A-Za-z_]\w*\s*\*\s*[A-Za-z_]\w*\s*<=\s*" + re.escape(primary) + r")", code))
+        if allocates_by_dimension or not primality_pattern:
+            dimension["dimension_value_profile"] = "identity"
+
+    # Avoid early-return masking for the recognizable pair-sum pattern. The
+    # deterministic values 1..N with target 2N guarantee that no distinct pair
+    # matches, exercising the complete nested-loop search.
+    pair_match = re.search(
+        r"\b([A-Za-z_]\w*)\s*\[\s*[A-Za-z_]\w*\s*\]\s*\+\s*"
+        r"\1\s*\[\s*[A-Za-z_]\w*\s*\]\s*==\s*([A-Za-z_]\w*)", code)
+    if pair_match:
+        pair_array, pair_target = pair_match.group(1), pair_match.group(2)
+    else:
+        pair_match = re.search(
+            r"\b([A-Za-z_]\w*)\s*==\s*([A-Za-z_]\w*)\s*\[\s*[A-Za-z_]\w*\s*\]\s*\+\s*"
+            r"\2\s*\[\s*[A-Za-z_]\w*\s*\]", code)
+        pair_array, pair_target = ((pair_match.group(2), pair_match.group(1))
+                                   if pair_match else (None, None))
+    if pair_array and pair_target:
+        for item in plan:
+            if str(item.get("variable", "")) == pair_array and str(item.get("shape", "")).lower() in {"sequence", "array", "integer_array"}:
+                item["value_profile"] = "distinct"
+            elif str(item.get("variable", "")) == pair_target:
+                item["value_profile"] = "pair_sum_no_match"
+                item.pop("fixed_value", None)
 
 
 def _schema_roots(fields: list[dict]) -> set[str]:
@@ -702,6 +798,8 @@ def materialize_stdin(spec: dict, n: int, seed: int = 17) -> str:
                     scalar = str(n if n % 2 else max(1, n - 1))
                 else:
                     scalar = str(n)
+            elif profile == "pair_sum_no_match":
+                scalar = str(2 * int(n))
             else:
                 scalar = _value_for(etype, profile, len(output_lines) + len(tokens), rng, fixed)
             values = [scalar]
@@ -747,33 +845,80 @@ def materialize_stdin(spec: dict, n: int, seed: int = 17) -> str:
 
 
 def validate_materialized_batch(spec: dict, raw_inputs: dict[int, str]) -> dict:
-    """Validate that schema-declared N-dependent structures really scale.
+    """Verify that generated payloads really vary along declared N dimensions.
 
-    This catches the exact silent failure where dimensions change in metadata
-    but a malformed scalar schema emits the same one-character stdin each time.
-    It is intentionally a guard, not a parser for arbitrary C input grammars.
+    Byte length alone is insufficient for scalar dimensions: values such as
+    16, 32 and 64 all occupy two characters. This audit therefore also reads
+    the primary scalar dimension token from each generated payload.
     """
     if not raw_inputs:
         raise ValueError("Input materializer produced an empty benchmark batch.")
-    fields = spec.get("analysis", {}).get("input_generation", {}).get("fields", [])
+    analysis = spec.get("analysis", {})
+    fields = analysis.get("input_generation", {}).get("fields", [])
+    dimension = analysis.get("profiling_dimension", {})
+    parameters = dimension.get("parameters", []) if isinstance(dimension, dict) else []
+    primary = (str(parameters[0].get("variable", ""))
+               if parameters and isinstance(parameters[0], dict) else "")
 
     def depends_on_n(expression):
         if isinstance(expression, int):
             return False
         return bool(re.search(r"\b(?:N|PRIMARY_N)\b", str(expression), re.IGNORECASE))
 
-    scaling = []
-    for field in fields:
-        shape = str(field.get("shape", "scalar")).lower()
-        count = field.get("count", 1)
-        if shape in {"string", "line", "char_line", "sequence", "array",
-                     "integer_array", "float_array", "string_array",
-                     "matrix", "sequence2d", "2d"} and depends_on_n(count):
-            scaling.append(str(field.get("variable", "<unnamed>")))
-        if shape == "string_array" and depends_on_n(field.get("inner_count", 8)):
-            scaling.append(str(field.get("variable", "<unnamed>") + "[width]"))
+    def count_for(expr, n, inner=None):
+        return _safe_count(expr, n, inner)
+
+    scaling, scalar_values = [], {}
+    ordered = sorted(fields, key=lambda f: int(f.get("position", 0)))
+    for n, raw in sorted(raw_inputs.items()):
+        tokens = raw.split()
+        cursor = 0
+        for field in ordered:
+            shape = str(field.get("shape", "scalar")).lower()
+            variable = str(field.get("variable", "<unnamed>"))
+            profile = str(field.get("value_profile", "")).lower()
+            if shape in {"scalar", "number", "integer", "float"}:
+                # Every scalar occupies one stdin token, whether or not it is
+                # the profiling dimension. Advance unconditionally; otherwise
+                # the audit reads the first scalar (e.g. a=0) as b when b is
+                # the second input field, falsely reporting that b never scales.
+                if variable == primary or profile == "dimension":
+                    if cursor < len(tokens):
+                        scalar_values.setdefault(variable, {})[int(n)] = tokens[cursor]
+                cursor += 1
+            elif shape in {"sequence", "array", "integer_array", "float_array", "string_array"}:
+                count = count_for(field.get("count", "N"), int(n))
+                if depends_on_n(field.get("count", "N")):
+                    scaling.append(variable)
+                if shape == "string_array":
+                    width_expr = field.get("inner_count", 8)
+                    if depends_on_n(width_expr):
+                        scaling.append(variable + "[width]")
+                    cursor += count
+                else:
+                    cursor += count
+            elif shape in {"matrix", "sequence2d", "2d"}:
+                rows = count_for(field.get("count", "N"), int(n))
+                cols = count_for(field.get("inner_count", "N"), int(n))
+                if depends_on_n(field.get("count", "N")) or depends_on_n(field.get("inner_count", "N")):
+                    scaling.append(variable)
+                cursor += rows * cols
+            elif shape in {"string", "line", "char_line"}:
+                if depends_on_n(field.get("count", "N")):
+                    scaling.append(variable)
+                # A generated string is serialized as one whitespace-free token.
+                cursor += 1
 
     lengths = {int(n): len(raw.encode("utf-8")) for n, raw in raw_inputs.items()}
+    scalar_dimension_values = {}
+    for variable, values in scalar_values.items():
+        scalar_dimension_values[variable] = values
+        if len(values) >= 2 and len(set(values.values())) == 1:
+            raise ValueError(
+                f"Primary scalar profiling dimension {variable!r} has the same generated value "
+                f"for every requested N: {values}. Refusing to profile an input that does not scale."
+            )
+
     if scaling and len(lengths) >= 2 and len(set(lengths.values())) == 1:
         raise ValueError(
             "Generated stdin has the same byte length for every requested N, "
@@ -781,12 +926,18 @@ def validate_materialized_batch(spec: dict, raw_inputs: dict[int, str]) -> dict:
             f"({', '.join(sorted(set(scaling)))}). Refusing to profile a non-scaling input. "
             f"stdin byte lengths: {lengths}. Check the input schema/materializer."
         )
+    if not scaling and not scalar_values:
+        warning = "No explicit N-dependent array/string dimension or primary scalar dimension was found."
+    else:
+        warning = None
     return {
         "method": "schema_materializer",
         "dimensions": sorted(int(n) for n in raw_inputs),
         "stdin_bytes": lengths,
         "scaling_fields": sorted(set(scaling)),
+        "scalar_dimension_values": scalar_dimension_values,
         "distinct_payload_lengths": len(set(lengths.values())),
+        "warning": warning,
     }
 
 
