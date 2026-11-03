@@ -1,12 +1,17 @@
+from __future__ import annotations
+
 """Authenticated student and teacher portal for the C-Grade engine."""
 
-from __future__ import annotations
+#TEACHER_USERNAME=
+#TEACHER_PASSWORD=
+#CGRADE_SESSION_SECRET=your-long-random-secret-key
 
 import glob
 import json
 import os
 import re
 import sqlite3
+import shutil
 import sys
 sys.dont_write_bytecode = True
 import uuid
@@ -205,12 +210,7 @@ def build_text_grading_report(
 
         fb = str(raw_fb or "").strip().replace("\n", " ")
 
-        # 2. Extract up to first full stop
-        if "." in fb:
-            first_part = fb.split(".")[0].strip()
-            if first_part:
-                fb = first_part + "."
-
+        # Preserve the complete feedback; the report renderer wraps it to 32 columns.
         if is_student and any(k in name.lower() or k in analyzer.lower() for k in ("similarity", "originality", "plagiarism")):
             fb = "similarity verified."
 
@@ -387,6 +387,28 @@ def show_report(report: dict, score: float | None, io_score: float | None,
             st.json(report)
 
 
+def establish_login(user: dict) -> None:
+    st.session_state["portal_user"] = user
+    st.query_params["session_token"] = auth.create_session_token(user)
+
+
+def sign_out() -> None:
+    st.query_params.clear()
+    st.session_state.clear()
+    st.rerun()
+
+
+def restore_login_from_url() -> None:
+    if "portal_user" in st.session_state:
+        return
+    token = st.query_params.get("session_token")
+    restored = auth.verify_session_token(token) if token else None
+    if restored:
+        st.session_state["portal_user"] = restored
+    elif token:
+        st.query_params.clear()
+
+
 def login_screen() -> None:
     st.sidebar.title("C-Grade")
     st.sidebar.caption("Student assessment portal")
@@ -406,15 +428,15 @@ def login_screen() -> None:
             submitted = st.form_submit_button("Sign in", type="primary", width="stretch")
         if submitted:
             if role == "Teacher" and auth.verify_teacher(username, password):
-                st.session_state["portal_user"] = {"role": "teacher", "name": "Teacher"}
+                establish_login({"role": "teacher", "name": "Teacher"})
                 st.rerun()
             if role == "Student":
                 student = auth.authenticate_student(username, password)
                 if student:
-                    st.session_state["portal_user"] = {
+                    establish_login({
                         "role": "student", "id": student["id"],
                         "name": student["name"], "roll_no": student["roll_no"],
-                    }
+                    })
                     st.rerun()
             st.error("Invalid credentials.")
         if role == "Teacher" and not (
@@ -645,6 +667,33 @@ def assignment_materials_view(assignments) -> None:
     assignment = assignments_by_id[assignment_id]
     problem_id = assignment["problem_id"]
     st.markdown(f"### {assignment['title']}  ·  `{problem_id}`")
+    with st.expander("Delete Assignment", expanded=False):
+        st.error("⚠️ Warning: Deleting this assignment will permanently remove all associated student submissions, evaluation scores, test cases, and filesystem directories.")
+        confirmed = st.checkbox(
+            "I understand this action is irreversible and want to permanently delete this assignment.",
+            key=f"confirm_delete_assignment_{assignment_id}",
+        )
+        if st.button("Delete Assignment Permanently", type="primary", disabled=not confirmed, key=f"delete_assignment_{assignment_id}"):
+            try:
+                deleted, deleted_slug = database.delete_assignment(int(assignment_id))
+                if deleted:
+                    if deleted_slug and re.fullmatch(r"[a-z0-9][a-z0-9_-]*", deleted_slug):
+                        target = (PROBLEMS_DIR / deleted_slug).resolve()
+                        if target.parent == PROBLEMS_DIR.resolve() and target.exists():
+                            shutil.rmtree(target)
+                    stale_keys = [key for key in list(st.session_state.keys()) if (
+                        key in {"materials_assignment_id", "edit_assignment_id"}
+                        or str(key).endswith(str(assignment_id))
+                        or (deleted_slug and deleted_slug in str(key))
+                    )]
+                    for key in stale_keys:
+                        st.session_state.pop(key, None)
+                    st.success("Assignment, submissions, evaluation evidence, and deployed files deleted.")
+                    st.rerun()
+                else:
+                    st.error("Assignment was not found; nothing was deleted.")
+            except Exception as exc:
+                st.error(f"Assignment deletion failed: {exc}")
     current_due = (
         date.fromisoformat(str(assignment["due_date"])[:10])
         if assignment["due_date"] else date.today() + timedelta(days=7)
@@ -718,9 +767,10 @@ def assignment_materials_view(assignments) -> None:
                 value=max(16, min(512, int(rules_data.get("memory_limit_mb", 64)))),
                 step=16, key=f"edit_memory_{problem_id}",
             )
-            edited_smoke = st.text_input(
-                "Sample smoke/sanitizer input",
+            edited_smoke = st.text_area(
+                "Sample input (smoke/sanitizer input)",
                 value=str(rules_data.get("smoke_input", "")),
+                height=120,
                 key=f"edit_smoke_{problem_id}",
             )
             edited_io_count = st.number_input(
@@ -877,8 +927,7 @@ def teacher_view() -> None:
         ["Overview", "Students", "Assignments", "Grading"],
     )
     if st.sidebar.button("Sign out", width="stretch"):
-        st.session_state.pop("portal_user", None)
-        st.rerun()
+        sign_out()
 
     assignments = database.list_assignments()
     if section == "Overview":
@@ -914,6 +963,25 @@ def teacher_view() -> None:
                     st.rerun()
                 except (UnicodeDecodeError, ValueError, csv.Error) as exc:
                     st.error(f"CSV format error: {exc}")
+        with st.expander("Add Single Student", expanded=False):
+            with st.form("add_single_student_form", clear_on_submit=True):
+                new_roll_no = st.text_input("Roll number", key="single_student_roll_no")
+                new_student_name = st.text_input("Full name", key="single_student_name")
+                add_student = st.form_submit_button("Add student", type="primary")
+            if add_student:
+                if not new_roll_no.strip() or not new_student_name.strip():
+                    st.error("Roll number and full name are required.")
+                else:
+                    try:
+                        database.create_student(new_roll_no, new_student_name)
+                        st.session_state.pop("edit_student_id", None)
+                        st.session_state.pop("delete_student_id", None)
+                        st.success(f"Student {new_roll_no.strip()} added with initial password '123'")
+                        st.rerun()
+                    except sqlite3.IntegrityError:
+                        st.error("That roll number already exists.")
+                    except ValueError as exc:
+                        st.error(str(exc))
         students = database.list_students()
         st.dataframe(
             [{"Roll number": s["roll_no"], "Student": s["name"], "Joined": s["created_at"]}
@@ -946,6 +1014,7 @@ def teacher_view() -> None:
                 else:
                     try:
                         if database.update_student_details(edit_id, updated_roll_no, updated_name):
+                            st.session_state.pop("edit_student_id", None)
                             st.success("Student details updated.")
                             st.rerun()
                         st.error("Student record was not found.")
@@ -977,6 +1046,8 @@ def teacher_view() -> None:
                     key=f"delete_student_{delete_id}",
                 ):
                     if database.delete_student(delete_id):
+                        st.session_state.pop("edit_student_id", None)
+                        st.session_state.pop("delete_student_id", None)
                         st.success("Student and related submissions deleted.")
                         st.rerun()
                     st.error("Student record was not found.")
@@ -1039,8 +1110,7 @@ def student_view() -> None:
     st.sidebar.caption(f"Student / {user['roll_no']}")
     section = st.sidebar.radio("Workspace", ["Assignments", "Submit code", "Settings"])
     if st.sidebar.button("Sign out", width="stretch"):
-        st.session_state.pop("portal_user", None)
-        st.rerun()
+        sign_out()
 
     assignments = database.get_student_submissions(user["id"])
     if section == "Assignments":
@@ -1111,61 +1181,107 @@ def student_view() -> None:
         upload = st.file_uploader("Upload a .c file", type=["c"])
         code = st.text_area("Or paste your C source", height=300, placeholder="#include <stdio.h>\nint main(void) {\n    return 0;\n}")
         source = upload.getvalue().decode("utf-8", errors="replace") if upload else code
-        if st.button("Submit code once", type="primary", disabled=not source.strip()):
+        if st.button("Review & Submit", type="primary", disabled=not source.strip(), key=f"review_submit_{assignment_id}"):
             if len(source.encode("utf-8")) > 200_000:
                 st.error("Source files must be smaller than 200 KB.")
-                return
-            problem_dir = PROBLEMS_DIR / assignment["problem_id"]
-            rules_path = problem_dir / f"{assignment['problem_id']}_rules.json"
-            if not rules_path.is_file():
-                st.error("The grading rules for this assignment are unavailable.")
-                return
-            source_dir = problem_dir / "submissions"
-            source_dir.mkdir(parents=True, exist_ok=True)
-            source_path = source_dir / f"student_{user['id']}_{uuid.uuid4().hex}.c"
-            try:
-                submission_id = database.create_submission(assignment_id, user["id"], source)
-            except sqlite3.IntegrityError:
-                st.warning("Your submission has already been recorded. Resubmission is disabled.")
-                st.rerun()
-            try:
-                source_path.write_text(source, encoding="utf-8")
-                with st.spinner("Compiling and evaluating your one allowed submission..."):
-                    from agent import grade
-                    report = grade(str(source_path), str(rules_path))
-                    result = evaluation_record(report)
-                    database.complete_submission(submission_id, result["status"], result)
-                if result["status"] == "graded":
-                    st.success("Your one submission has been evaluated and saved.")
-                else:
-                    st.warning("Submission saved, but it did not compile. Resubmission is disabled.")
-                show_report(report, result["score"], result["io_score"],
-                            result["quality_score"], result["sanitizer_score"],
-                            result["feedback_summary"], include_private=False,
-                            student_name=user["name"], roll_no=user["roll_no"],
-                            assignment_title=assignment["title"], submitted_code=source)
-            except Exception as exc:
-                failure = {
-                    "grade": 0,
-                    "problem": assignment["problem_id"],
-                    "first_pass": {"compiled": False, "error": str(exc)},
-                    "metrics": [],
-                    "suggestions": [f"Evaluation failed: {type(exc).__name__}: {exc}"],
+            elif not source.strip():
+                st.error("Please provide non-empty C source code.")
+            else:
+                st.session_state["pending_submission"] = {
+                    "assignment_id": int(assignment_id), "source": source,
                 }
-                result = evaluation_record(failure)
-                result["status"] = "failed"
-                database.complete_submission(submission_id, "failed", result)
-                st.error(f"Evaluation failed. The attempt is recorded and resubmission is disabled: {exc}")
-                show_report(failure, result["score"], result["io_score"],
-                            result["quality_score"], result["sanitizer_score"],
-                            result["feedback_summary"], include_private=False,
-                            student_name=user["name"], roll_no=user["roll_no"],
-                            assignment_title=assignment["title"], submitted_code=source)
+                st.session_state["submission_confirmed"] = False
+                st.rerun()
+
+        pending = st.session_state.get("pending_submission")
+        if pending and pending.get("assignment_id") == int(assignment_id):
+            @st.dialog("Confirm Final Submission")
+            def confirm_final_submission() -> None:
+                latest_assignment = database.get_assignment(int(assignment_id))
+                if latest_assignment is None:
+                    st.error("This assignment is no longer available.")
+                    st.session_state.pop("pending_submission", None)
+                    return
+                _, closed_now = assignment_deadline(latest_assignment["due_date"])
+                st.markdown(f"### {latest_assignment['title']}")
+                st.write(f"Deadline: {latest_assignment['due_date'] or 'No deadline'}")
+                if closed_now:
+                    st.error("The deadline has passed. Submission is not allowed.")
+                    if st.button("Close", key="close_expired_submission_dialog"):
+                        st.session_state.pop("pending_submission", None)
+                        st.rerun()
+                    return
+                st.warning("⚠️ IMPORTANT: Only ONE attempt is allowed for this assignment. Once submitted, your code will be immediately compiled, tested against all analyzers, and permanently recorded. You cannot edit or resubmit.")
+                st.caption(f"Source length: {len(pending['source'].encode('utf-8')):,} bytes")
+                verified = st.checkbox("I confirm that this is my final, verified solution.", key=f"final_confirm_{assignment_id}")
+                busy = bool(st.session_state.get("submission_in_progress", False))
+                if st.button("Confirm & Finalize Submission", type="primary", disabled=(not verified or busy), key=f"finalize_submission_{assignment_id}"):
+                    st.session_state["submission_in_progress"] = True
+                    try:
+                        # The unique (assignment_id, student_id) constraint is the authoritative
+                        # concurrency guard; the record is created exactly once before evaluation.
+                        source_text = pending["source"]
+                        problem_slug = str(latest_assignment["problem_id"] or "")
+                        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", problem_slug):
+                            raise ValueError("Assignment has an invalid problem identifier.")
+                        problem_dir = PROBLEMS_DIR / problem_slug
+                        rules_path = problem_dir / f"{problem_slug}_rules.json"
+                        if not rules_path.is_file():
+                            raise FileNotFoundError("The grading rules for this assignment are unavailable.")
+                        source_dir = problem_dir / "submissions"
+                        source_dir.mkdir(parents=True, exist_ok=True)
+                        source_path = source_dir / f"student_{user['id']}_{uuid.uuid4().hex}.c"
+                        submission_id = database.create_submission(int(assignment_id), int(user["id"]), source_text)
+                        try:
+                            source_path.write_text(source_text, encoding="utf-8")
+                            with st.spinner("Compiling and evaluating your one allowed submission..."):
+                                from agent import grade
+                                report = grade(str(source_path), str(rules_path))
+                                result = evaluation_record(report)
+                                database.complete_submission(submission_id, result["status"], result)
+                        except Exception as evaluation_exc:
+                            failure = {
+                                "grade": 0, "problem": problem_slug,
+                                "first_pass": {"compiled": False, "error": str(evaluation_exc)},
+                                "metrics": [],
+                                "suggestions": [f"Evaluation failed: {type(evaluation_exc).__name__}: {evaluation_exc}"],
+                            }
+                            result = evaluation_record(failure)
+                            result["status"] = "failed"
+                            database.complete_submission(submission_id, "failed", result)
+                            report = failure
+                            st.error(f"Evaluation failed. Your attempt is recorded and cannot be resubmitted: {evaluation_exc}")
+                        st.session_state.pop("pending_submission", None)
+                        st.session_state.pop(f"final_confirm_{assignment_id}", None)
+                        st.session_state["last_submission_result"] = {
+                            "report": report, "result": result, "assignment_title": latest_assignment["title"]
+                        }
+                        st.session_state["submission_in_progress"] = False
+                        st.rerun()
+                    except sqlite3.IntegrityError:
+                        st.session_state.pop("pending_submission", None)
+                        st.session_state["submission_in_progress"] = False
+                        st.error("A submission has already been recorded for this assignment. The one-attempt policy prevents another attempt.")
+                    except Exception as exc:
+                        st.session_state["submission_in_progress"] = False
+                        st.error(f"Submission could not be started: {exc}")
+            confirm_final_submission()
+
+        last_result = st.session_state.get("last_submission_result")
+        if last_result and last_result.get("assignment_title") == assignment["title"]:
+            result = last_result["result"]
+            report = last_result["report"]
+            st.success("Your one submission has been evaluated and saved." if result["status"] == "graded" else "Your one submission has been recorded; review the evaluation report.")
+            show_report(report, result["score"], result["io_score"], result["quality_score"],
+                        result["sanitizer_score"], result["feedback_summary"], include_private=False,
+                        student_name=user["name"], roll_no=user["roll_no"],
+                        assignment_title=last_result["assignment_title"], submitted_code="")
+
     else:
         st.markdown('<p class="portal-kicker">Account security</p>', unsafe_allow_html=True)
         st.title("Change password")
         student = database.get_student_by_id(user["id"])
-        if student and student["password_hash"] == database.DEFAULT_PASSWORD_HASH:
+        if student and auth.verify_password("123", student["password_hash"]):
             st.warning("You are using the initial password. Set a new password now.")
         with st.form("change_password_form"):
             current = st.text_input("Current password", type="password")
@@ -1182,6 +1298,8 @@ def student_view() -> None:
             else:
                 st.success("Password changed successfully.")
 
+
+restore_login_from_url()
 
 if "portal_user" not in st.session_state:
     login_screen()
