@@ -20,6 +20,9 @@ import os
 import platform
 import subprocess
 from datetime import datetime, timezone
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 # ---------------------------------------------------------------------------
@@ -112,13 +115,13 @@ def _build_usefulness_limitations() -> dict:
                 )
             },
             {
-                "limitation": "Complexity estimator requires Linux perf or clang coverage",
+                "limitation": "Complexity estimator currently requires Valgrind Callgrind and its development header",
                 "example": (
-                    "On a Windows host, perf is unavailable; the SanitizerCoverage "
-                    "fallback needs clang. An O(N^2) bubble-sort may be misclassified "
-                    "if both tools are absent."
+                    "If Valgrind or valgrind/callgrind.h is unavailable, the estimator "
+                    "cannot collect genuine instruction counts and reports the result "
+                    "as inconclusive rather than guessing from execution time."
                 ),
-                "mitigation": "Install WSL2 with perf, or use the clang fallback pipeline."
+                "mitigation": "Run the portal in WSL2/Linux and install Valgrind plus its development headers."
             },
             {
                 "limitation": "Plagiarism detector can be fooled by deep refactoring",
@@ -248,10 +251,21 @@ def generate_actionable_suggestions(metrics: list[dict], first_pass: dict) -> li
             )
 
         elif a_name == "complexity_estimator" or m.get("name") == "complexity":
-            req = ev.get("required_complexity", ev.get("expected_complexity", "optimal"))
-            suggestions.append(
-                f"Optimize time complexity: reduce nested iterations to meet the required {req} asymptotic bound."
-            )
+            detected = str(ev.get("detected_complexity", "")).strip().lower()
+            fit = ev.get("fit", {}) if isinstance(ev.get("fit", {}), dict) else {}
+            fit_complexity = str(fit.get("complexity", "")).strip().lower()
+            if detected == "inconclusive" or fit_complexity == "inconclusive":
+                reason = fit.get("reason") or ev.get("profiling_error")
+                detail = f" Reason: {reason}" if reason else ""
+                suggestions.append(
+                    "Time complexity could not be measured reliably; no optimization conclusion was made. "
+                    "Check the profiling diagnostics and rerun with working Callgrind instrumentation." + detail
+                )
+            else:
+                req = ev.get("required_complexity", ev.get("expected_complexity", "optimal"))
+                suggestions.append(
+                    f"Optimize time complexity: reduce nested iterations to meet the required {req} asymptotic bound."
+                )
 
         elif a_name == "llm_review" or m.get("name") == "readability":
             raw = ev.get("raw_response", {})
@@ -485,19 +499,19 @@ def generate_report(
     # Persist to disk
     # ------------------------------------------------------------------
     stem       = os.path.splitext(os.path.basename(submission_path))[0]
-    report_dir = os.path.join("problems", problem_id, "reports")
-    os.makedirs(report_dir, exist_ok=True)
+    report_dir = PROJECT_ROOT / "problems" / str(problem_id) / "reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
 
-    json_path = os.path.join(report_dir, f"{stem}.json")
-    txt_path  = os.path.join(report_dir, f"{stem}.txt")
+    json_path = report_dir / f"{stem}.json"
+    txt_path = report_dir / f"{stem}.txt"
 
-    with open(json_path, "w", encoding="utf-8") as fj:
+    with json_path.open("w", encoding="utf-8") as fj:
         json.dump(report, fj, indent=2, default=str)
 
-    with open(txt_path, "w", encoding="utf-8") as ft:
+    with txt_path.open("w", encoding="utf-8") as ft:
         ft.write(_build_text_report(report))
 
-    report["_json_path"] = json_path
-    report["_txt_path"]  = txt_path
+    report["_json_path"] = str(json_path)
+    report["_txt_path"] = str(txt_path)
 
     return report

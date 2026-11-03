@@ -20,7 +20,6 @@ Contract: same submission + same rules = same grade.
 from __future__ import annotations
 
 import argparse
-import importlib
 import inspect
 import json
 import os
@@ -82,8 +81,10 @@ def _run_single_analyzer(
     The result always has keys: score, evidence, feedback.
     """
     try:
-        mod = importlib.import_module(f"analyzers.{analyzer_name}")
-        mod = importlib.reload(mod)          # always use the freshest code
+        # Import once and let Python's module cache provide a stable module
+        # object. Reloading analyzers inside concurrent grading threads can
+        # leave imported dependencies stale and creates race conditions.
+        mod = __import__(f"analyzers.{analyzer_name}", fromlist=["evaluate"])
         eval_fn = getattr(mod, "evaluate", None)
 
         if eval_fn is None:
@@ -107,9 +108,19 @@ def _run_single_analyzer(
             res = eval_fn(source_path)
 
         if isinstance(res, dict):
+            evidence = res.get("evidence", res)
+            # Normalize the complexity-fit schema at the orchestration
+            # boundary. Older cached/imported fitter versions used `family`,
+            # while current code uses `generic_family` (or both).
+            if analyzer_name == "complexity_estimator" and isinstance(evidence, dict):
+                fit = evidence.get("fit")
+                if isinstance(fit, dict):
+                    family = fit.get("generic_family", fit.get("family", "Inconclusive"))
+                    fit.setdefault("generic_family", family)
+                    fit.setdefault("family", family)
             return analyzer_name, {
                 "score":    float(res.get("score", 0.0)),
-                "evidence": res.get("evidence", res),
+                "evidence": evidence,
                 "feedback": str(res.get("feedback", "Completed.")),
             }
 

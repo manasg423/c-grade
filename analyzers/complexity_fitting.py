@@ -16,6 +16,10 @@ def _models():
         ("Polynomial-logarithmic", "O(N log N)", lambda n: n * math.log2(max(2.0, n))),
         ("Polynomial-logarithmic", "O(N^2 log N)", lambda n: n ** 2 * math.log2(max(2.0, n))),
     ]
+    # Generic polynomial exponents broaden coverage without assuming an algorithm.
+    for exponent in (0.25, 0.5, 0.75, 1.5, 2.5, 3.5, 4.0, 5.0, 6.0):
+        models.append(("Polynomial", f"O(N^{exponent:g})",
+                       lambda n, p=exponent: n ** p))
     for c in (1.5, 2.0, 3.0):
         models.append(("Exponential", f"O({c:g}^N)", lambda n, c=c: c ** min(n, 500)))
         for k in (1, 2):
@@ -64,8 +68,8 @@ def _fit(ns, ys, fn):
                 ((pred[i] - ys[i]) / max(EPS, ys[i]))**2 for i in range(len(ys))))}
 
 
-def fit_growth(measurements, config=None):
-    """Select among fixed generic models; never fit arbitrary growth exponents."""
+def _fit_growth_impl(measurements, config=None):
+    """Select fixed generic models. Reject mixed units and flat traces; input dimensions must be scalarized explicitly by the caller."""
     grouped, excluded, methods = {}, [], {}
     for i, row in enumerate(measurements or []):
         try:
@@ -80,19 +84,15 @@ def fit_growth(measurements, config=None):
         grouped.setdefault(n, []).append(cost)
         methods[method] = methods.get(method, 0) + 1
 
-    selected_method = max(methods, key=methods.get) if methods else None
+    selected_method = next(iter(methods)) if len(methods) == 1 else None
     if len(methods) > 1:
-        # Retain only the predominant counter unit.
-        grouped = {}
-        for i, row in enumerate(measurements or []):
-            try:
-                if str(row.get("method") or "unspecified") != selected_method:
-                    continue
-                n, cost = float(row["n"]), float(row.get("cost", row.get("instructions")))
-                if n > 1 and cost > 0 and math.isfinite(n) and math.isfinite(cost):
-                    grouped.setdefault(n, []).append(cost)
-            except (TypeError, ValueError, KeyError):
-                pass
+        return {"complexity": "inconclusive", "generic_family": "Inconclusive",
+                "confidence": "low", "model": "fixed_candidate", "fit_error": None,
+                "reason": "Mixed measurement methods have incompatible counter units; measurements were not combined.",
+                "measurement_count": 0, "valid_observation_count": 0,
+                "excluded_observation_count": len(excluded),
+                "excluded_observations": excluded, "warnings": ["mixed_measurement_methods"],
+                "measurement_method": None, "raw_measurements": list(measurements or [])}
 
     points = [{"n": n, "cost": statistics.median(v), "method": selected_method}
               for n, v in sorted(grouped.items())]
@@ -107,6 +107,16 @@ def fit_growth(measurements, config=None):
                 "raw_measurements": list(measurements or [])}
 
     ns, ys = [p["n"] for p in points], [p["cost"] for p in points]
+    # A flat trace is commonly an instrumentation/boundary failure, not proof
+    # that a nontrivial input-dependent algorithm is O(1).
+    if max(ys) <= min(ys) * 1.02:
+        return {"complexity": "inconclusive", "generic_family": "Inconclusive",
+                "confidence": "low", "model": "fixed_candidate", "fit_error": None,
+                "reason": "Instruction counts are effectively flat across input sizes; refusing to classify this as O(1).",
+                "measurement_count": len(points), "valid_observation_count": len(points),
+                "excluded_observation_count": len(excluded),
+                "excluded_observations": excluded, "warnings": ["flat_measurement_trace"],
+                "measurement_method": selected_method, "raw_measurements": list(measurements or [])}
     candidates = []
     for family, label, fn in _models():
         try:
@@ -136,35 +146,43 @@ def fit_growth(measurements, config=None):
         confidence = "medium"
     else:
         confidence = "low"
-    competitors = []
-    for candidate in candidates[1:4]:
-        if candidate["family"] == "additive_basis":
-            dterm = _dominant_term(candidate["terms"])
-            label = _complexity_label(dterm)
-        else:
-            p = candidate["parameters"]
-            label = _complexity_label({"p": p["b"], "q": p["c"], "log_d": math.log(p["d"]), "factorial_power": p["e"]})
-        competitors.append({"family": candidate["family"], "complexity": label,
-                            "bic": round(candidate["bic"], 5),
-                            "selection_score": round(candidate.get("selection_score", candidate["bic"]), 5),
-                            "fit_error": round(candidate["fit_error"], 6)})
-        return {"complexity": complexity,
-            "dominant_asymptotic": complexity,
-            "fitted_complexity": fitted_complexity,
-            "generic_family": generic_family,
-            "fitted_function": fitted_function, "model": best["family"],
-            "model_family": best["family"],
-            "parameters": parameters, "confidence": confidence,
-            "fit_error": round(best["fit_error"], 8), "bic": round(best["bic"], 6),
-            "model_selection": {"raw_bic_gap_to_runner_up": (None if not math.isfinite(raw_bic_gap) else round(raw_bic_gap, 6)),
-                                "selection_gap_to_runner_up": (None if not math.isfinite(selection_gap) else round(selection_gap, 6)),
-                                "basis_search_penalty": round(best.get("search_penalty", 0.0), 6)},
-            "cross_validation_log_error": None if cv_error is None else round(cv_error, 8),
-            "residual_diagnostics": diagnostics, "competing_models": competitors,
-            "measurement_count": len(points), "valid_observation_count": len(points),
-            "excluded_observation_count": len(excluded), "excluded_observations": excluded,
-            "warnings": warnings, "original_valid_observation_count": original_valid_count,
-            "measurement_method": points[0].get("method") if points else None,
-            "raw_measurements": list(measurements or []),
-            "observations_used": [{"n": p["n"], "cost": p["cost"], "method": p.get("method")}
-                                  for p in points]}
+
+    return {
+        "complexity": best["complexity"],
+        "dominant_asymptotic": best["complexity"],
+        "generic_family": best["generic_family"],
+        "fitted_function": f"{best['fixed_cost']:.6g} + {best['scale']:.6g} * {best['complexity']}",
+        "model": "fixed_candidate", "model_family": "fixed_candidate",
+        "parameters": {"fixed_cost": best["fixed_cost"], "scale": best["scale"]},
+        "confidence": confidence, "fit_error": round(best["fit_error"], 8),
+        "bic": round(best["bic"], 6),
+        "model_selection": {"bic_gap_to_runner_up": None if gap is None else round(gap, 6),
+                            "candidate_count": len(candidates)},
+        "cross_validation_log_error": None,
+        "residual_diagnostics": {"log_rmse": round(best["log_rmse"], 8),
+                                 "max_abs_log_residual": round(max(map(abs, best["log_residuals"])), 8)},
+        "competing_models": [{"complexity": c["complexity"],
+                              "generic_family": c["generic_family"],
+                              "bic": round(c["bic"], 6)} for c in candidates[1:5]],
+        "measurement_count": len(points), "valid_observation_count": len(points),
+        "excluded_observation_count": len(excluded), "excluded_observations": excluded,
+        "warnings": [], "original_valid_observation_count": len(points) + len(excluded),
+        "measurement_method": selected_method, "raw_measurements": list(measurements or []),
+        "observations_used": points,
+    }
+
+
+
+def fit_growth(measurements, config=None):
+    """Backward-compatible public wrapper for the complexity-fit result schema.
+
+    Older C-Grade Engine consumers read ``fit["family"]`` while newer
+    versions use ``generic_family``. Return both names on every path, including
+    inconclusive fits, so callers cannot fail with KeyError.
+    """
+    result = _fit_growth_impl(measurements, config)
+    if isinstance(result, dict):
+        family = result.get("generic_family", result.get("family", "Inconclusive"))
+        result.setdefault("generic_family", family)
+        result.setdefault("family", family)
+    return result

@@ -1,584 +1,1095 @@
 #!/usr/bin/env python3
-"""Universal C complexity estimator with an inferred post-input measurement boundary.
+"""C-Grade Engine complexity estimator.
 
-Primary measurement: Valgrind Callgrind instruction counts, when available.
-Fallback: Clang SanitizerCoverage basic-block execution events. The fallback is a
-runtime-growth proxy, NOT a machine-instruction count.
+Public compatibility API:
+    evaluate(source_path, binary_path=None, params=None, limits=None) -> dict
 
-Public API: evaluate(source_path, binary_path=None, params=None, limits=None)
-No algorithm names or algorithm-specific rules are used by this module.
+Only genuine Valgrind Callgrind instruction counts are accepted. Input analysis
+and raw stdin generation are delegated to input_spec.py; model fitting remains
+in complexity_fitting.py and its public contract is unchanged.
 """
 from __future__ import annotations
-import math, os, random, re, shutil, statistics, subprocess, tempfile, time
+
+import math
+import os
+import re
+import glob
+import shutil
+import subprocess
+import tempfile
+import time
 from typing import Optional
+
+try:
+    from .complexity_fitting import fit_growth
+    from . import input_spec as _input_spec
+except ImportError:
+    from complexity_fitting import fit_growth
+    import input_spec as _input_spec
 
 INPUT_CALLS = ("scanf", "fscanf", "fgets", "fgetc", "getchar", "getc", "fread", "read")
 
-# ---------- Small C-source scanner (lexical, not a complete C parser) ----------
-def _mask_comments_strings(src: str) -> str:
-    out=list(src); i=0; state='code'
-    while i<len(src):
-        if state=='code':
-            if src.startswith('//',i): out[i]=out[i+1]=' '; i+=2; state='line'; continue
-            if src.startswith('/*',i): out[i]=out[i+1]=' '; i+=2; state='block'; continue
-            if src[i]=='"': out[i]=' '; i+=1; state='str'; continue
-            if src[i]=="'": out[i]=' '; i+=1; state='char'; continue
-            i+=1
-        elif state=='line':
-            if src[i]=='\n': state='code'
-            else: out[i]=' '
-            i+=1
-        elif state=='block':
-            if src.startswith('*/',i): out[i]=out[i+1]=' '; i+=2; state='code'
-            else:
-                if src[i]!='\n': out[i]=' '
-                i+=1
-        else:
-            q='"' if state=='str' else "'"
-            if src[i]=='\\':
-                out[i]=' '; i+=1
-                if i<len(src): out[i]=' '; i+=1
-            elif src[i]==q: out[i]=' '; i+=1; state='code'
-            else:
-                if src[i]!='\n': out[i]=' '
-                i+=1
-    return ''.join(out)
 
-def _match(src: str, pos: int, op: str, cl: str) -> Optional[int]:
-    depth=0
-    for i in range(pos,len(src)):
-        if src[i]==op: depth+=1
-        elif src[i]==cl:
-            depth-=1
-            if depth==0: return i
+def _mask_comments_strings(source: str) -> str:
+    """Blank comments and literals while preserving source offsets and braces."""
+    out = list(source)
+    i, state = 0, "code"
+    while i < len(source):
+        if state == "code":
+            if source.startswith("//", i):
+                out[i] = out[i + 1] = " "
+                i += 2
+                state = "line"
+            elif source.startswith("/*", i):
+                out[i] = out[i + 1] = " "
+                i += 2
+                state = "block"
+            elif source[i] == '"':
+                out[i] = " "
+                i += 1
+                state = "string"
+            elif source[i] == "'":
+                out[i] = " "
+                i += 1
+                state = "char"
+            else:
+                i += 1
+        elif state == "line":
+            if source[i] == "\n":
+                state = "code"
+            else:
+                out[i] = " "
+            i += 1
+        elif state == "block":
+            if source.startswith("*/", i):
+                out[i] = out[i + 1] = " "
+                i += 2
+                state = "code"
+            else:
+                if source[i] != "\n":
+                    out[i] = " "
+                i += 1
+        else:
+            quote = '"' if state == "string" else "'"
+            if source[i] == "\\":
+                out[i] = " "
+                i += 1
+                if i < len(source):
+                    out[i] = " "
+                    i += 1
+            elif source[i] == quote:
+                out[i] = " "
+                i += 1
+                state = "code"
+            else:
+                if source[i] != "\n":
+                    out[i] = " "
+                i += 1
+    return "".join(out)
+
+
+def _matching(source: str, start: int, opening: str, closing: str) -> Optional[int]:
+    depth = 0
+    for i in range(start, len(source)):
+        if source[i] == opening:
+            depth += 1
+        elif source[i] == closing:
+            depth -= 1
+            if depth == 0:
+                return i
     return None
 
-def _statement_end(masked: str, pos: int) -> int:
-    while pos<len(masked) and masked[pos].isspace(): pos+=1
-    if pos>=len(masked): return pos
-    if masked[pos]=='{':
-        e=_match(masked,pos,'{','}')
-        return e+1 if e is not None else len(masked)
-    kw=re.match(r'(for|while|if|switch)\b',masked[pos:])
-    if kw:
-        op=masked.find('(',pos+len(kw.group(1)))
-        cp=_match(masked,op,'(',')') if op>=0 else None
-        if cp is None:
-            e=masked.find(';',pos); return e+1 if e>=0 else len(masked)
-        e=_statement_end(masked,cp+1)
-        if kw.group(1)=='if':
-            q=e
-            while q<len(masked) and masked[q].isspace(): q+=1
-            if masked.startswith('else',q): e=_statement_end(masked,q+4)
-        return e
-    depth=0
-    for i in range(pos,len(masked)):
-        if masked[i] in '([': depth+=1
-        elif masked[i] in ')]': depth=max(0,depth-1)
-        elif masked[i]==';' and depth==0: return i+1
-    return len(masked)
 
-def _input_call(masked: str):
-    pat=re.compile(r'\b('+'|'.join(INPUT_CALLS)+r')\s*\(')
-    found=list(pat.finditer(masked))
-    if not found: return None
-    m=found[-1]; op=masked.find('(',m.start()); cp=_match(masked,op,'(',')')
-    return (m.start(),cp+1) if cp is not None else None
+def _statement_end(source: str, pos: int) -> int:
+    while pos < len(source) and source[pos].isspace():
+        pos += 1
+    if pos >= len(source):
+        return pos
+    if source[pos] == "{":
+        end = _matching(source, pos, "{", "}")
+        return end + 1 if end is not None else len(source)
+    keyword = re.match(r"(for|while|if|switch)\b", source[pos:])
+    if keyword:
+        op = source.find("(", pos + len(keyword.group(1)))
+        close = _matching(source, op, "(", ")") if op >= 0 else None
+        if close is None:
+            end = source.find(";", pos)
+            return end + 1 if end >= 0 else len(source)
+        end = _statement_end(source, close + 1)
+        if keyword.group(1) == "if":
+            cursor = end
+            while cursor < len(source) and source[cursor].isspace():
+                cursor += 1
+            if source.startswith("else", cursor):
+                end = _statement_end(source, cursor + 4)
+        return end
+    depth = 0
+    for i in range(pos, len(source)):
+        if source[i] in "([":
+            depth += 1
+        elif source[i] in ")]":
+            depth = max(0, depth - 1)
+        elif source[i] == ";" and depth == 0:
+            return i + 1
+    return len(source)
+
 
 def infer_measurement_boundary(source: str) -> dict:
-    """Return a conservative source offset after the last input operation.
+    """Find a conservative insertion point after the final input-only statement.
 
-    If non-input computation is interleaved in the enclosing input loop, counting
-    starts before that loop so that computation is not thrown away.
+    If the final input read is inside a loop, that loop must contain input reads
+    only. Ambiguous input/algorithm mixtures are rejected instead of measured
+    from a guessed point.
     """
-    masked=_mask_comments_strings(source)
-    call=_input_call(masked)
-    if call is None:
-        main_match = re.search(r'\bmain\s*\([^)]*\)\s*\{', masked)
-        if main_match:
-            return {
-                "supported": True,
-                "offset": main_match.end(),
-                "mode": "main_entry_no_stdin",
-                "reason": "No stdin read was found; count begins at main entry for a fixed-input program.",
-            }
-        return {"supported":False,"reason":"No supported standard input call or main() function was found."}
-    call_start,call_end=call
-    loops=[]
-    for m in re.finditer(r'\b(for|while)\s*\(',masked):
-        op=masked.find('(',m.start()); cp=_match(masked,op,'(',')')
-        if cp is None: continue
-        end=_statement_end(masked,cp+1)
-        if m.start()<call_start<end:
-            loops.append((m.start(),end,cp+1,end-1))
-    if loops:
-        outer=min(loops,key=lambda x:x[0])
-        body=masked[outer[2]:outer[3]]
-        # Remove complete if-statements whose condition performs an input read,
-        # e.g. if (scanf(...) != 1) return 1;. Leaving the trailing condition
-        # text behind falsely makes a pure input loop look like computation.
-        remove_spans=[]
-        for if_match in re.finditer(r'\bif\s*\(',body):
-            op=body.find('(',if_match.start())
-            cp=_match(body,op,'(',')')
+    masked = _mask_comments_strings(source)
+    pattern = re.compile(r"\b(" + "|".join(INPUT_CALLS) + r")\s*\(")
+    calls = list(pattern.finditer(masked))
+    if not calls:
+        return {"supported": False, "reason": "No supported standard input call was found."}
+    last = calls[-1]
+    open_pos = masked.find("(", last.start())
+    close_pos = _matching(masked, open_pos, "(", ")")
+    if close_pos is None:
+        return {"supported": False, "reason": "Could not parse the final input call."}
+
+    # A read may be embedded in an if-condition. Do not assume the `if`
+    # body is the successful path: `if (scanf(...) != 1) { return; }` is a
+    # common error check, and inserting into that body means instrumentation
+    # never starts for valid input. Classify simple scanf-result predicates
+    # and instrument the successful continuation instead.
+    conditional_bodies = []
+    for match in re.finditer(r"\bif\s*\(", masked):
+        op = masked.find("(", match.start())
+        cp = _matching(masked, op, "(", ")")
+        if cp is None or not (match.start() < last.start() < cp):
+            continue
+
+        call_open = masked.find("(", last.start())
+        call_close = _matching(masked, call_open, "(", ")")
+        args_text = masked[call_open + 1:call_close]
+        depth = 0
+        commas = 0
+        for char in args_text:
+            if char in "([":
+                depth += 1
+            elif char in ")]":
+                depth = max(0, depth - 1)
+            elif char == "," and depth == 0:
+                commas += 1
+        expected = max(1, commas)  # first argument is the format string
+
+        predicate = masked[call_close + 1:cp].strip()
+        prefix = masked[op + 1:last.start()].strip()
+        success_when_then = None
+        comparison = re.search(r"(==|!=|>=|<=|>|<)\s*(-?\d+)\s*$", predicate)
+        if comparison:
+            operator, number = comparison.group(1), int(comparison.group(2))
+            success_when_then = {
+                "==": expected == number,
+                "!=": expected != number,
+                ">": expected > number,
+                "<": expected < number,
+                ">=": expected >= number,
+                "<=": expected <= number,
+            }[operator]
+        elif re.fullmatch(r"!\s*", prefix):
+            return {"supported": False,
+                    "reason": "Negated scanf return checks are ambiguous because EOF is -1 (truthy); use an explicit assignment-count comparison."}
+        elif not predicate:
+            success_when_then = True  # `if (scanf(...))`
+
+        if success_when_then is None:
+            return {"supported": False,
+                    "reason": "The final input call is inside an if-condition whose success/failure predicate could not be classified safely."}
+
+        then_start = cp + 1
+        while then_start < len(masked) and masked[then_start].isspace():
+            then_start += 1
+        then_end = _statement_end(masked, then_start)
+        after_then = then_end
+        while after_then < len(masked) and masked[after_then].isspace():
+            after_then += 1
+        has_else = re.match(r"else\b", masked[after_then:]) is not None
+
+        if success_when_then:
+            offset = then_start + 1 if masked[then_start:then_start + 1] == "{" else then_start
+            mode = "inside_if_body"
+            reason = "Measurement starts in the then-branch, selected when input succeeds."
+        elif has_else:
+            else_start = after_then + len("else")
+            while else_start < len(masked) and masked[else_start].isspace():
+                else_start += 1
+            offset = else_start + 1 if masked[else_start:else_start + 1] == "{" else else_start
+            mode = "inside_else_body"
+            reason = "Measurement starts in the else-branch, selected when input succeeds."
+        else:
+            offset = then_end
+            mode = "after_input_guard"
+            reason = "Measurement starts after the failed-input guard, on the successful continuation."
+
+        conditional_bodies.append((cp - op, offset, mode, reason))
+
+    if conditional_bodies:
+        _, offset, mode, reason = min(conditional_bodies, key=lambda item: item[0])
+        return {"supported": True, "offset": offset, "mode": mode, "reason": reason}
+
+    enclosing = []
+    for match in re.finditer(r"\b(for|while)\s*\(", masked):
+        op = masked.find("(", match.start())
+        cp = _matching(masked, op, "(", ")")
+        if cp is None:
+            continue
+        end = _statement_end(masked, cp + 1)
+        if match.start() < last.start() < end:
+            enclosing.append((match.start(), cp, end))
+    if enclosing:
+        start, header_end, end = min(enclosing, key=lambda item: item[2] - item[0])
+        body = masked[header_end + 1:end]
+        # Remove complete input-call statements; if anything meaningful remains,
+        # the loop mixes input with computation and its exit is not a safe point.
+        for match in reversed(list(pattern.finditer(body))):
+            op = body.find("(", match.start())
+            cp = _matching(body, op, "(", ")")
             if cp is None:
                 continue
-            condition=body[op+1:cp]
-            if re.search(r'\b('+'|'.join(INPUT_CALLS)+r')\s*\(',condition):
-                remove_spans.append((if_match.start(),_statement_end(body,cp+1)))
-        for start,end in reversed(remove_spans):
-            body=body[:start]+' '*(end-start)+body[end:]
-        # Remove standalone input-call statements after the if cleanup.
-        for input_match in list(re.finditer(r'\b('+'|'.join(INPUT_CALLS)+r')\s*\(',body))[::-1]:
-            op=body.find('(',input_match.start())
-            cp=_match(body,op,'(',')')
-            if cp is not None:
-                semi=body.find(';',cp)
-                if semi >= 0:
-                    body=body[:input_match.start()]+' '*(semi+1-input_match.start())+body[semi+1:]
-        body=re.sub(r'\b(for|while)\s*\([^)]*\)','',body,flags=re.S)
-        meaningful=re.sub(r'[{}\s;]','',body)
-        if meaningful:
-            return {"supported":True,"offset":outer[0],"mode":"mixed_input_computation",
-                    "reason":"Computation is interleaved with input; count begins before the enclosing input loop."}
-        return {"supported":True,"offset":outer[1],"mode":"after_input_loop",
-                "reason":"Count begins after the enclosing loop that performs the final input reads."}
-    return {"supported":True,"offset":_statement_end(masked,call_end),"mode":"after_input_statement",
-            "reason":"Count begins after the final input statement."}
+            semi = body.find(";", cp + 1)
+            stop = semi + 1 if semi >= 0 else cp + 1
+            body = body[:match.start()] + (" " * (stop - match.start())) + body[stop:]
+        if re.sub(r"[{}\s;]", "", body):
+            return {"supported": False,
+                    "reason": "The final input loop contains non-input statements; refusing to guess the measurement boundary."}
+        return {"supported": True, "offset": end, "mode": "after_input_loop",
+                "reason": "Measurement starts immediately after the final input-only loop."}
 
-_RUNTIME = r"""
-#include <stdio.h>
+    return {"supported": True, "offset": _statement_end(masked, close_pos + 1),
+            "mode": "after_input_statement",
+            "reason": "Measurement starts immediately after the final input statement."}
+
+
+_RUNTIME_SOURCE = r'''
 #include <stdlib.h>
-#include <stddef.h>
-#if defined(CGRADE_USE_CALLGRIND) && defined(__has_include)
-# if __has_include(<valgrind/callgrind.h>)
-#  include <valgrind/callgrind.h>
-#  define CGRADE_CG_START() CALLGRIND_ZERO_STATS
-# else
-#  define CGRADE_CG_START() ((void)0)
-# endif
-#else
-# define CGRADE_CG_START() ((void)0)
+#ifndef CGRADE_USE_CALLGRIND
+#error "C-Grade requires Callgrind instrumentation"
 #endif
-static volatile unsigned long long cgrade_events=0;
-static volatile int cgrade_enabled=0;
-#if defined(__GNUC__)
-__attribute__((no_instrument_function)) void __cyg_profile_func_enter(void *this_fn, void *call_site) {
-    (void)this_fn; (void)call_site;
-    if(cgrade_enabled) cgrade_events++;
+#include <valgrind/callgrind.h>
+void __cgrade_start(void) {
+    /* Start from a clean counter state after input parsing. */
+    CALLGRIND_ZERO_STATS;
+    CALLGRIND_START_INSTRUMENTATION;
 }
-__attribute__((no_instrument_function)) void __cyg_profile_func_exit(void *this_fn, void *call_site) {
-    (void)this_fn; (void)call_site;
+static void __cgrade_stop(void) {
+    /* Stop counting at normal process exit. Let Callgrind write its one
+       standard final dump; an explicit dump here creates an empty second
+       dump at process termination on some Valgrind versions. */
+    CALLGRIND_STOP_INSTRUMENTATION;
 }
-#endif
-__attribute__((no_sanitize("coverage"))) void __sanitizer_cov_trace_pc(void) { if(cgrade_enabled) cgrade_events++; }
-__attribute__((no_sanitize("coverage"))) void __cgrade_start(void) { cgrade_enabled=1; cgrade_events++; CGRADE_CG_START(); }
-__attribute__((no_sanitize("coverage"))) size_t __wrap_strlen(const char *s) { size_t n=0; while(s[n]!='\0') n++; if(cgrade_enabled) cgrade_events+=(unsigned long long)n+1; return n; }
-__attribute__((no_sanitize("coverage"))) static void cgrade_report(void) { cgrade_enabled=0; fprintf(stderr,"CGRADE_EVENTS=%llu\\n",cgrade_events); }
-__attribute__((constructor,no_sanitize("coverage"))) static void cgrade_init(void) { atexit(cgrade_report); }
-"""
+__attribute__((constructor)) static void __cgrade_init(void) { atexit(__cgrade_stop); }
+'''
+
 
 def instrument_source(source: str):
-    boundary=infer_measurement_boundary(source)
-    if not boundary.get('supported'): raise ValueError(boundary.get('reason','Unsupported input boundary'))
-    pos=boundary['offset']
-    rewritten='void __cgrade_start(void);\n'+source[:pos]+'\n__cgrade_start();\n'+source[pos:]+_RUNTIME
-    return rewritten,boundary
+    boundary = infer_measurement_boundary(source)
+    if not boundary.get("supported"):
+        raise ValueError(boundary.get("reason", "Unsupported measurement boundary."))
+    offset = int(boundary["offset"])
+    rewritten = "void __cgrade_start(void);\n" + source[:offset] + "\n__cgrade_start();\n" + source[offset:] + _RUNTIME_SOURCE
+    return rewritten, boundary
 
-def compile_instrumented(source_path: str, output_path: str, compiler: str='clang', callgrind_header: bool=False):
-    """Compile with Clang coverage when available, otherwise GCC function hooks.
 
-    GCC fallback is a function-entry event proxy, not a basic-block or instruction
-    counter. The selected mode is returned in the boundary metadata.
-    """
-    src=open(source_path,encoding='utf-8',errors='ignore').read()
-    rewritten,boundary=instrument_source(src)
-    tmp=output_path+'.instrumented.c'
-    with open(tmp,'w') as f: f.write(rewritten)
+def _callgrind_header() -> Optional[str]:
+    for path in ("/usr/include/valgrind/callgrind.h", "/usr/local/include/valgrind/callgrind.h"):
+        if os.path.isfile(path):
+            return path
+    return None
 
-    requested = compiler or 'clang'
+
+def compile_instrumented(source_path: str, output_path: str,
+                         compiler: str = "gcc", callgrind_header: bool = True,
+                         optimization: str = "-O0") -> dict:
+    """Compile a temporary instrumented copy; never modify the student source."""
+    with open(source_path, encoding="utf-8", errors="replace") as handle:
+        source = handle.read()
+    rewritten, boundary = instrument_source(source)
+    header = _callgrind_header()
+    if not shutil.which("valgrind") or not header:
+        raise RuntimeError("Callgrind unavailable: install Valgrind and its development headers.")
+    requested = compiler or "gcc"
     selected = shutil.which(requested)
-    if selected and os.path.basename(selected).startswith('clang'):
-        if callgrind_header:
-            # Callgrind counts machine instructions itself. Do not add a second
-            # SanitizerCoverage counter to this build.
-            mode='callgrind_instructions'
-            cmd=[selected,'-O0','-g','-fno-builtin','-DCGRADE_USE_CALLGRIND=1',
-                 tmp,'-Wl,--wrap=strlen','-o',output_path]
-        else:
-            mode='clang_sanitizer_coverage'
-            cmd=[selected,'-O0','-g','-fno-builtin','-fsanitize-coverage=trace-pc',
-                 tmp,'-Wl,--wrap=strlen','-o',output_path]
-    else:
-        gcc = shutil.which('gcc') or shutil.which('cc')
-        if not gcc:
-            raise FileNotFoundError(f"Neither Clang nor GCC is available (requested compiler: {requested}). Install gcc or clang.")
-        if callgrind_header:
-            mode='callgrind_instructions'
-            cmd=[gcc,'-O0','-g','-fno-builtin','-DCGRADE_USE_CALLGRIND=1',
-                 tmp,'-Wl,--wrap=strlen','-o',output_path]
-        else:
-            mode='gcc_function_entry_proxy'
-            cmd=[gcc,'-O0','-g','-fno-builtin','-finstrument-functions',
-                 tmp,'-Wl,--wrap=strlen','-o',output_path]
-    run=subprocess.run(cmd,capture_output=True,text=True)
-    if run.returncode:
-        raise RuntimeError(f"Compilation failed using {os.path.basename(cmd[0])}: {run.stderr[-4000:]}")
-    boundary['compiler']=os.path.basename(cmd[0])
-    boundary['counter_mode']=mode
+    if not selected:
+        # A portable default fallback for systems where only one common compiler exists.
+        selected = next((shutil.which(name) for name in ("gcc", "clang", "cc") if shutil.which(name)), None)
+    if not selected:
+        raise FileNotFoundError("No supported C compiler found (gcc, clang, or cc).")
+    fd, instrumented_path = tempfile.mkstemp(prefix="cgrade_instrumented_", suffix=".c", dir=os.path.dirname(os.path.abspath(output_path)))
+    os.close(fd)
+    with open(instrumented_path, "w", encoding="utf-8") as handle:
+        handle.write(rewritten)
+    cmd = [selected, optimization, "-g", "-fno-builtin", "-DCGRADE_USE_CALLGRIND=1",
+           "-I" + os.path.dirname(os.path.dirname(header)), instrumented_path, "-o", output_path]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode:
+        try:
+            os.unlink(instrumented_path)
+        except OSError:
+            pass
+        raise RuntimeError("Instrumented compilation failed:\n" + result.stderr[-5000:])
+    boundary.update({"compiler": os.path.basename(selected), "optimization": optimization,
+                     "counter_mode": "callgrind_instructions", "instrumented_source": instrumented_path})
     return boundary
 
-def _parse_callgrind(path):
-    if not os.path.exists(path): return None
-    with open(path,errors='ignore') as f:
-        for line in f:
-            if line.startswith('summary:'):
-                try: return int(line.split(':',1)[1].strip())
-                except ValueError: return None
-    return None
 
-def profile_one(binary: str, data: str, timeout: float=5.0,
-                instruction_counts_only: bool=True):
-    """Measure one run; require Callgrind instruction counts by default.
+def _parse_callgrind_file(path: str) -> Optional[int]:
+    """Read the Ir count from a Callgrind profile.
 
-    Set instruction_counts_only=False only when a clearly labelled runtime
-    proxy is acceptable for the experiment.
+    Depending on the Callgrind version/output format, the aggregate may be
+    written as ``summary:`` near the header or ``totals:`` at the end. Prefer
+    a positive summary, but fall back to totals when summary is absent/zero.
+    The event column is selected by name so custom event ordering is safe.
     """
-    valgrind=shutil.which('valgrind')
-    header=os.path.exists('/usr/include/valgrind/callgrind.h')
-    if valgrind and header:
-        with tempfile.TemporaryDirectory(prefix='cgrade-cg-') as td:
-            out=os.path.join(td,'callgrind.out')
-            cmd=[valgrind,'--tool=callgrind','--quiet','--instr-atstart=yes',f'--callgrind-out-file={out}',binary]
-            p=subprocess.run(cmd,input=data,text=True,capture_output=True,timeout=timeout)
-            count=_parse_callgrind(out)
-            # Reject empty/failed instruction profiles rather than silently
-            # changing measurement units halfway through the experiment.
-            if p.returncode==0 and count is not None and count > 0:
-                return {'cost':count,'method':'callgrind_instructions','stderr':p.stderr[-500:]}
-            callgrind_error = (
-                f'Callgrind did not produce a valid instruction count '
-                f'(exit={p.returncode}, summary={count}). stderr: {p.stderr[-500:]}'
-            )
-    else:
-        callgrind_error = (
-            'Callgrind instruction counting is unavailable: install Valgrind and '
-            'the Valgrind development headers in the Linux/WSL environment.'
+    if not os.path.isfile(path):
+        return None
+    events = None
+    summary_value = None
+    totals_value = None
+
+    def event_count(raw: str) -> Optional[int]:
+        values = raw.split()
+        if not values:
+            return None
+        try:
+            if not events or "Ir" not in events:
+                return None
+            index = events.index("Ir")
+            candidate = int(values[index])
+        except (ValueError, IndexError):
+            return None
+        # UINT64_MAX is used as an undefined/empty counter sentinel by some
+        # Callgrind output paths. Never accept it as a real instruction count.
+        if candidate < 0 or candidate >= (1 << 64) - 1:
+            return None
+        return candidate
+
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as handle:
+            for line in handle:
+                if line.startswith("events:"):
+                    events = line.split(":", 1)[1].split()
+                elif line.startswith("summary:"):
+                    summary_value = event_count(line.split(":", 1)[1])
+                elif line.startswith("totals:"):
+                    totals_value = event_count(line.split(":", 1)[1])
+    except OSError:
+        return None
+
+    if summary_value is not None and summary_value > 0:
+        return summary_value
+    if totals_value is not None and totals_value > 0:
+        return totals_value
+    # Preserve zero only when the file explicitly contains an aggregate.
+    if summary_value is not None:
+        return summary_value
+    return totals_value
+
+
+def _callgrind_profile_files(path: str) -> list[str]:
+    """Return the final profile plus numbered intermediate dumps.
+
+    Callgrind names intermediate dumps `<out-file>.1`, `<out-file>.2`, ...;
+    the final process-termination dump uses `<out-file>` itself. The old
+    `.part*` glob was incorrect and silently discarded the measured region.
+    """
+    files = [path] if os.path.isfile(path) else []
+    for candidate in glob.glob(path + ".*"):
+        suffix = candidate[len(path):]
+        if re.fullmatch(r"\.\d+(?:-\d+)?", suffix) and os.path.isfile(candidate):
+            files.append(candidate)
+    return sorted(set(files), key=lambda item: (item != path, item))
+
+
+def _parse_callgrind(path: str) -> Optional[int]:
+    """Sum valid non-overlapping interval dumps and the final dump for this run."""
+    files = _callgrind_profile_files(path)
+    if not files:
+        return None
+    total = 0
+    found = False
+    for profile in files:
+        value = _parse_callgrind_file(profile)
+        if value is not None:
+            total += value
+            found = True
+    return total if found else None
+
+
+def profile_one(binary: str, data: str, timeout: float = 5.0) -> dict:
+    """Execute one raw stdin payload and return genuine Callgrind instruction count."""
+    valgrind = shutil.which("valgrind")
+    if not valgrind or not _callgrind_header():
+        raise RuntimeError("Strict profiling requires Valgrind and valgrind/callgrind.h.")
+    # Valgrind's vgdb helper creates named pipes in TMPDIR.  In WSL,
+    # TMPDIR may point at the project on /mnt/c (DrvFS), where mknod/FIFO
+    # creation can fail.  Keep both Valgrind's scratch files and its output
+    # on the Linux filesystem, and disable vgdb because this profiler never
+    # attaches an interactive debugger.
+    linux_tmp = "/tmp"
+    if not os.path.isdir(linux_tmp) or not os.access(linux_tmp, os.W_OK | os.X_OK):
+        raise RuntimeError(
+            "Callgrind requires a writable Linux /tmp directory. "
+            "Do not point TMPDIR at /mnt/c or another Windows-mounted path."
         )
-    if instruction_counts_only:
-        raise RuntimeError(callgrind_error)
-    p=subprocess.run([binary],input=data,text=True,capture_output=True,timeout=timeout)
-    m=re.search(r'CGRADE_EVENTS=(\d+)',p.stderr)
-    if p.returncode!=0 or not m:
-        raise RuntimeError(f'Program failed ({p.returncode}) or emitted no profiling counter: {p.stderr[-500:]}')
-    events=int(m.group(1))
-    if events <= 0:
-        raise RuntimeError('Profiling produced zero runtime events; refusing to classify complexity from an empty measurement.')
-    return {'cost':events,'method':'sanitizer_coverage_basic_block_events','stderr':p.stderr[-500:]}
 
-# The generalized statistical fitter is kept separate from C instrumentation.
-# Relative import is used by C-Grade Engine; fallback supports direct file tests.
-try:
-    from .complexity_fitting import fit_growth
-except ImportError:
-    from complexity_fitting import fit_growth
-
-
-# Minimal generic stdin generator; callers may provide input_builder for unusual grammars/preconditions.
-
-
-# ---------- Self-contained input-contract inference (embedded from V3) ----------
-def strip_comments(source: str) -> str:
-    pattern = re.compile(r'("(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\')|//[^\n]*|/\*[\s\S]*?\*/')
-    return pattern.sub(lambda m: m.group(1) if m.group(1) else "", source)
-
-def split_c_args(text: str) -> list[str]:
-    parts, start, depth, quote, escaped = [], 0, 0, None, False
-    for i, ch in enumerate(text):
-        if quote:
-            if escaped:
-                escaped = False
-            elif ch == "\\":
-                escaped = True
-            elif ch == quote:
-                quote = None
-        elif ch in ("'", '"'):
-            quote = ch
-        elif ch in "([{":
-            depth += 1
-        elif ch in ")]}":
-            depth -= 1
-        elif ch == "," and depth == 0:
-            parts.append(text[start:i].strip())
-            start = i + 1
-    parts.append(text[start:].strip())
-    return parts
-
-def calls(source: str, name: str) -> list[list[str]]:
-    """Extract simple C calls while respecting nested parentheses and strings."""
-    found = []
-    pattern = re.compile(r"\b" + re.escape(name) + r"\s*\(")
-    for match in pattern.finditer(source):
-        i, depth, quote, escaped = match.end(), 1, None, False
-        start = i
-        while i < len(source) and depth:
-            ch = source[i]
-            if quote:
-                if escaped:
-                    escaped = False
-                elif ch == "\\":
-                    escaped = True
-                elif ch == quote:
-                    quote = None
-            elif ch in ("'", '"'):
-                quote = ch
-            elif ch == "(":
-                depth += 1
-            elif ch == ")":
-                depth -= 1
-            i += 1
-        if depth == 0:
-            found.append(split_c_args(source[start:i-1]))
-    return found
-
-def scanf_conversions(fmt: str) -> list[str]:
-    # scanf conversion specifiers, excluding %% literals and %* assignments.
-    rx = re.compile(r"%(?:\*)?(?:\d+)?(?:hh|h|ll|l|j|z|t|L)?([diuoxXfFeEgGaAcsp\[])")
-    return [m.group(1) for m in rx.finditer(fmt) if not fmt[max(0, m.start()-1):m.start()] == "%"]
-
-def declared_arrays(source: str) -> dict[str, int]:
-    result = {}
-    # Parse array declarators after a primitive type, including comma-separated
-    # declarations such as: int n, values[100], matrix[20][20];
-    for declaration in re.finditer(
-        r"\b(?:char|short|int|long|float|double)\s+([^;]+);", source
-    ):
-        body = declaration.group(1)
-        for item in re.finditer(r"\b(\w+)\s*\[\s*(\d+)\s*\]", body):
-            result[item.group(1)] = int(item.group(2))
-    return result
+    with tempfile.TemporaryDirectory(prefix="cgrade-callgrind-", dir=linux_tmp) as directory:
+        output = os.path.join(directory, "callgrind.out")
+        child_env = os.environ.copy()
+        child_env.update({
+            "TMPDIR": directory,
+            "TMP": directory,
+            "TEMP": directory,
+        })
+        command = [valgrind, "--tool=callgrind", "--quiet", "--vgdb=no",
+                   "--instr-atstart=no", "--combine-dumps=no", "--error-exitcode=97",
+                   f"--callgrind-out-file={output}", binary]
+        process = subprocess.run(command, input=data, text=True, capture_output=True,
+                                 timeout=timeout, env=child_env)
+        if process.returncode != 0:
+            raise RuntimeError(
+                f"Program failed under Callgrind (exit {process.returncode}). "
+                f"stderr: {process.stderr[-1500:]}"
+            )
+        count = _parse_callgrind(output)
+        if count is None or count <= 0:
+            profile_files = _callgrind_profile_files(output) or [output]
+            diagnostics = []
+            for profile_file in profile_files:
+                part_count = _parse_callgrind_file(profile_file)
+                try:
+                    with open(profile_file, "r", encoding="utf-8", errors="ignore") as handle:
+                        tail = handle.read()[-1000:]
+                except OSError:
+                    tail = "<not created>"
+                diagnostics.append({
+                    "file": os.path.basename(profile_file),
+                    "summary": part_count,
+                    "tail": tail
+                })
+            raise RuntimeError(
+                "Callgrind produced no positive Ir total across final/numbered profile dumps. "
+                f"Exit code: {process.returncode}. "
+                f"Profiles: {diagnostics!r}. "
+                f"Valgrind stderr: {process.stderr[-1500:]}"
+            )
+        return {"cost": count, "method": "callgrind_instructions",
+                "stderr": process.stderr[-500:]}
 
 
-def loop_bound_for(source: str, index: str) -> Optional[str]:
-    """Find the variable bound of a loop using *index* as its induction variable."""
-    for m in re.finditer(r"for\s*\(([^;]*);([^;]*);([^)]*)\)", source, re.S):
-        if re.search(r"\b" + re.escape(index) + r"\b", m.group(2)):
-            bound = re.search(r"<\s*(\w+)", m.group(2))
-            if bound:
-                return bound.group(1)
+def _compatibility_error(message: str) -> dict:
+    return {"score": 0.0,
+            "evidence": {"error": message, "detected_complexity": "inconclusive"},
+            "feedback": f"Evaluation failed: {message}"}
+
+
+def _complexity_rank(label: str):
+    """Parse supported asymptotic labels into comparable lexicographic ranks."""
+    value = (label or "").strip().lower().replace(" ", "")
+    if not value.startswith("o(") or not value.endswith(")"):
+        return None
+    body = value[2:-1]
+    if body in {"1", "1.0"}:
+        return (0, 0.0, 0.0, 0.0)
+
+    factorial = re.search(r"\(n!\)(?:\^([0-9]+(?:\.[0-9]+)?))?|n!", body)
+    if factorial:
+        token = factorial.group(0)
+        exponent = float(factorial.group(1) or 1.0) if factorial.group(1) else 1.0
+        remainder = body.replace(token, "")
+        exponential = re.search(r"([0-9]+(?:\.[0-9]+)?)\^n", remainder)
+        base_log = math.log(float(exponential.group(1))) if exponential and float(exponential.group(1)) > 1 else 0.0
+        if exponential:
+            remainder = remainder.replace(exponential.group(0), "")
+        log_match = re.search(r"(?:\(log(?:\(n\)|n)\)|log(?:\(n\)|n))(?:\^([0-9]+(?:\.[0-9]+)?))?", remainder)
+        q = float(log_match.group(1) or 1.0) if log_match else 0.0
+        if log_match:
+            remainder = remainder.replace(log_match.group(0), "")
+        poly_match = re.search(r"n\^([0-9]+(?:\.[0-9]+)?)", remainder)
+        p = float(poly_match.group(1)) if poly_match else (1.0 if "n" in remainder else 0.0)
+        return (4, exponent, base_log, p, q)
+
+    exponential = re.search(r"([0-9]+(?:\.[0-9]+)?)\^n", body)
+    if exponential:
+        base = float(exponential.group(1))
+        if base <= 1.0:
+            return None
+        remainder = body.replace(exponential.group(0), "")
+        log_match = re.search(r"(?:\(log(?:\(n\)|n)\)|log(?:\(n\)|n))(?:\^([0-9]+(?:\.[0-9]+)?))?", remainder)
+        q = float(log_match.group(1) or 1.0) if log_match else 0.0
+        if log_match:
+            remainder = remainder.replace(log_match.group(0), "")
+        poly_match = re.search(r"n\^([0-9]+(?:\.[0-9]+)?)", remainder)
+        p = float(poly_match.group(1)) if poly_match else (1.0 if "n" in remainder else 0.0)
+        return (3, math.log(base), p, q)
+
+    log_match = re.search(r"(?:\(log(?:\(n\)|n)\)|log(?:\(n\)|n))(?:\^([0-9]+(?:\.[0-9]+)?))?", body)
+    q = float(log_match.group(1) or 1.0) if log_match else 0.0
+    remainder = body.replace(log_match.group(0), "") if log_match else body
+    poly_match = re.search(r"n\^([0-9]+(?:\.[0-9]+)?)", remainder)
+    p = float(poly_match.group(1)) if poly_match else (1.0 if "n" in remainder else 0.0)
+    if p > 0:
+        return (2, p, q, 0.0)
+    if q > 0:
+        return (1, q, 0.0, 0.0)
     return None
 
-def infer_input_contract(source: str) -> dict:
-    """Infer common scalar, 1-D, 2-D, string and line-oriented stdin shapes.
 
-    This is intentionally syntax-driven, not algorithm-name-driven. It supports
-    common scanf-in-loop patterns and keeps dimensions explicit.
+
+
+def _next_size(last_n: int, last_cost: int, previous_n: Optional[int],
+               previous_cost: Optional[int], max_n: int, params: dict) -> int:
+    """Choose the next N from instruction growth, not Valgrind wall-clock startup."""
+    if previous_n and previous_cost and last_n > previous_n:
+        ratio = max(1.0, last_cost / max(1, previous_cost))
+        size_ratio = last_n / previous_n
+        local_power = math.log(ratio) / max(1e-9, math.log(size_ratio))
+    else:
+        local_power = 1.0
+    if last_cost > int(params.get("adaptive_high_instruction_count", 30_000_000)) or local_power >= 5.0:
+        factor = float(params.get("adaptive_slow_growth_factor", 1.25))
+    elif last_cost > int(params.get("adaptive_medium_instruction_count", 5_000_000)) or local_power >= 3.0:
+        factor = float(params.get("adaptive_medium_growth_factor", 1.5))
+    else:
+        factor = float(params.get("adaptive_growth_factor", 2.0))
+    candidate = max(last_n + 1, int(math.ceil(last_n * factor)))
+    return min(max_n, candidate)
+
+
+def _has_multi_branch_recursion(source: str) -> bool:
+    """Detect functions that directly invoke themselves at least twice.
+
+    This is a conservative scheduling hint for branching recursion (for example,
+    Hanoi/Fibonacci), not a complexity classifier. It only changes benchmark
+    spacing so a geometric N schedule does not jump straight into timeouts.
     """
-    source = strip_comments(source)
-    fields = []
-    arrays = declared_arrays(source)
-    two_dim = {}
-    fixed_2d_capacity = {}
-    for declaration in re.finditer(
-        r"\b(?:char|short|int|long|float|double)\s+([^;]+);", source
-    ):
-        body = declaration.group(1)
-        for m in re.finditer(
-            r"\b(\w+)\s*\[\s*(\w+|\d+)\s*\]\s*\[\s*(\w+|\d+)\s*\]", body
-        ):
-            two_dim[m.group(1)] = (m.group(2), m.group(3))
-            if m.group(2).isdigit() and m.group(3).isdigit():
-                fixed_2d_capacity[m.group(1)] = (int(m.group(2)), int(m.group(3)))
+    code = _mask_comments_strings(source)
+    function = re.compile(
+        r"(?:^|[;}]|\n)\s*(?:[A-Za-z_]\w*\s+|\*\s*)+"
+        r"([A-Za-z_]\w*)\s*\([^;{}]*\)\s*\{", re.MULTILINE
+    )
+    for match in function.finditer(code):
+        name = match.group(1)
+        brace = code.find("{", match.start())
+        depth, end = 0, brace
+        while end < len(code):
+            if code[end] == "{":
+                depth += 1
+            elif code[end] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            end += 1
+        body = code[brace + 1:end]
+        if len(re.findall(r"\b" + re.escape(name) + r"\s*\(", body)) >= 2:
+            return True
+    return False
 
-    for call in calls(source, "scanf"):
-        if not call or not call[0].startswith('"'):
-            continue
-        fmt = call[0][1:-1]
-        args = call[1:]
-        conversions = scanf_conversions(fmt)
-        arg_index = 0
-        for conv in conversions:
-            if arg_index >= len(args):
+
+def _benchmark_dimensions(params: dict, max_n: int, min_success: int,
+                          max_success: int, adaptive: bool,
+                          branching_recursion: bool = False) -> list[int]:
+    """Choose a safe schedule; use additive steps for branching recursion."""
+    if not adaptive:
+        return list(dict.fromkeys(int(value) for value in params.get("input_sizes", [])))
+    start = max(2, int(params.get("adaptive_start_n", 4)))
+    requested = []
+    if branching_recursion:
+        step = max(1, int(params.get("adaptive_recursive_step", 2)))
+        value = start
+        while len(requested) < max_success and value <= max_n:
+            requested.append(value)
+            value += step
+    else:
+        value = start
+        while len(requested) < max_success and value <= max_n:
+            requested.append(value)
+            if value == max_n:
                 break
-            arg = args[arg_index]
-            arg_index += 1
-            clean = arg.replace("&", "").strip()
-            # Match scalar, a[i], or a[i][j].
-            vm = re.search(r"([A-Za-z_]\w*)\s*(?:\[\s*(\w+)\s*\])?\s*(?:\[\s*(\w+)\s*\])?\s*$", clean)
-            variable = vm.group(1) if vm else None
-            idx1 = vm.group(2) if vm else None
-            idx2 = vm.group(3) if vm else None
-            if idx1 and idx2:
-                row_var = loop_bound_for(source, idx1)
-                col_var = loop_bound_for(source, idx2)
-                if row_var and col_var:
-                    fields.append({"kind": "repeated2d", "type": conv,
-                                   "row_var": row_var, "col_var": col_var,
-                                   "variable": variable,
-                                   "row_capacity": fixed_2d_capacity.get(variable or "", (10000, 10000))[0],
-                                   "col_capacity": fixed_2d_capacity.get(variable or "", (10000, 10000))[1]})
-                    continue
-            if idx1:
-                count_var = loop_bound_for(source, idx1)
-                if count_var:
-                    if conv in ("s", "["):
-                        token_capacity = fixed_2d_capacity.get(variable or "", (10000, 10000))[1]
-                        fields.append({"kind": "string_array", "type": conv,
-                                       "count_var": count_var, "variable": variable,
-                                       "capacity": arrays.get(variable or "", 10000),
-                                       "token_capacity": token_capacity})
-                    else:
-                        fields.append({"kind": "repeated", "type": conv,
-                                       "count_var": count_var, "variable": variable,
-                                       "capacity": arrays.get(variable or "", 10000)})
-                    continue
-            if conv in ("s", "["):
-                fields.append({"kind": "string", "type": conv, "variable": variable,
-                               "capacity": arrays.get(variable or "", 10000)})
-            elif conv == "c":
-                fields.append({"kind": "char", "type": conv, "variable": variable})
-            else:
-                fields.append({"kind": "number", "type": conv, "variable": variable})
+            value = min(max_n, value * 2)
+    if len(requested) < min_success:
+        raise ValueError(
+            f"Benchmark range {start}..{max_n} provides only {len(requested)} distinct "
+            f"dimensions; at least {min_success} are required. Increase adaptive_max_n."
+        )
+    return requested
 
-    for call in calls(source, "fgets"):
-        if len(call) >= 2:
-            var = re.search(r"\b([A-Za-z_]\w*)\b", call[0])
-            cap = re.search(r"\b(\d+)\b", call[1])
-            fields.append({"kind": "line", "variable": var.group(1) if var else None,
-                           "capacity": int(cap.group(1)) if cap else 10000})
 
-    if not fields:
-        return {"supported": False, "reason": "No supported scanf/fgets input contract was found.", "fields": []}
 
-    # Identify scalar variables that control loops or dimensions. This helps
-    # generate scalable inputs without assuming a particular algorithm.
-    loop_bounds = set()
-    for m in re.finditer(r"for\s*\(([^;]*);([^;]*);([^)]*)\)", source, re.S):
-        b = re.search(r"<\s*(\w+)", m.group(2))
-        if b:
-            loop_bounds.add(b.group(1))
-    return {"supported": True, "fields": fields, "arrays": arrays,
-            "two_dimensional_arrays": two_dim, "fixed_2d_capacity": fixed_2d_capacity,
-            "loop_bound_variables": sorted(loop_bounds)}
+def _collect_with_timeout_fallback(binary: str, dimensions: list[int],
+                                   get_input, timeout: float,
+                                   max_success: int, profiler=None):
+    """Collect profiles and, after any timeout, search smaller dimensions.
 
-def _numeric_value(conv: str, value: int) -> str:
-    if conv in ("f", "F", "e", "E", "g", "G", "a", "A"):
-        return str(float(value))
-    if conv == "c":
-        return "x"
-    return str(value)
-
-def make_input(contract: dict, n: int, seed: int = 17) -> str:
-    """Generate size-scaled input from the inferred read contract.
-
-    A repeated scanf inside a loop consumes values; it does NOT consume another
-    count token. Scalar dimensions are emitted exactly once, in source read order.
+    The first timeout stops the original upward schedule. We binary-search the
+    interval between the largest successful N and the timed-out N. If that
+    interval is exhausted before max_success observations are collected, we
+    fill with previously untried smaller dimensions. This applies to both
+    adaptive and user-supplied size schedules.
     """
-    fields = contract["fields"]
-    loop_bounds = set(contract.get("loop_bound_variables", []))
-    # Repeated fields refer to a previously read loop-bound scalar.
-    repeated_counts = {f.get("count_var") for f in fields if f["kind"] in ("repeated", "string_array")}
-    repeated_rows = {f.get("row_var") for f in fields if f["kind"] == "repeated2d"}
-    repeated_cols = {f.get("col_var") for f in fields if f["kind"] == "repeated2d"}
-    dim_vars = repeated_rows | repeated_cols
-    output = []
-    scalar_seen = 0
+    profiler = profiler or profile_one
+    planned = sorted({int(n) for n in dimensions})
+    attempted: set[int] = set()
+    measurements, validation = [], []
+    timeout_count = 0
+    fallback_triggered = False
+    fallback_phase = "normal"
+    fallback_low, fallback_high = 1, None
+    fallback_fill = None
 
-    for field in fields:
-        kind = field["kind"]
-        if kind == "number":
-            var = field.get("variable")
-            if var in repeated_counts or var in dim_vars or var in loop_bounds:
-                value = n
-            else:
-                # Independent scalar parameters are scaled too, but kept distinct
-                # so two-argument routines do not accidentally receive (x, x).
-                scalar_seen += 1
-                value = n + scalar_seen + 1
-            output.append(_numeric_value(field.get("type", "d"), value))
-        elif kind == "char":
-            output.append("x")
-        elif kind == "string":
-            cap = max(2, int(field.get("capacity", 10000)) - 1)
-            output.append("a" * min(n, cap))
-        elif kind == "line":
-            cap = max(1, int(field.get("capacity", 10000)) - 2)
-            output.append("x" * min(n, cap))
-        elif kind == "repeated":
-            count = min(n, max(1, int(field.get("capacity", 10000))))
-            # Ascending values satisfy common sorted-array preconditions
-            # without identifying the algorithm using the array.
-            output.extend(str(i * 2 + 1) for i in range(count))
-        elif kind == "string_array":
-            count = min(n, max(1, int(field.get("capacity", 10000))))
-            token_capacity = max(2, int(field.get("token_capacity", 10000)))
-            word_len = max(1, min(16, n, token_capacity - 1))
-            output.extend(("x" * word_len) for _ in range(count))
-        elif kind == "repeated2d":
-            rows = min(n, max(1, int(field.get("row_capacity", 10000))))
-            cols = min(n, max(1, int(field.get("col_capacity", 10000))))
-            output.extend(str((i * cols + j) % 97) for i in range(rows) for j in range(cols))
-    return "\n".join(output) + "\n"
+    def run_one(n: int, is_fallback: bool):
+        nonlocal timeout_count
+        raw_stdin = get_input(n)
+        started = time.monotonic()
+        try:
+            measured = profiler(binary, raw_stdin, timeout=timeout)
+            elapsed = time.monotonic() - started
+            measurements.append({"n": n, "cost": int(measured["cost"]),
+                                 "method": measured["method"],
+                                 "elapsed_s": round(elapsed, 6)})
+            validation.append({"n": n, "valid": True,
+                               "stdin_bytes": len(raw_stdin.encode("utf-8")),
+                               "profiling_elapsed_s": round(elapsed, 6),
+                               **({"timeout_fallback": True} if is_fallback else {})})
+            return True
+        except subprocess.TimeoutExpired:
+            timeout_count += 1
+            validation.append({"n": n, "valid": False, "reason": "program_timeout",
+                               **({"timeout_fallback": True} if is_fallback else {})})
+            return False
+        except Exception as exc:
+            validation.append({"n": n, "valid": False, "reason": str(exc),
+                               **({"timeout_fallback": True} if is_fallback else {})})
+            if "Callgrind" in str(exc) or "Valgrind" in str(exc):
+                raise
+            return None
 
-def validate_input_size(contract: dict, n: int):
-    """Reject sizes that exceed statically visible fixed input storage."""
-    for field in contract.get("fields", []):
-        kind = field.get("kind")
-        if kind in ("repeated", "string_array") and n > int(field.get("capacity", 10000)):
-            return False, f"n={n} exceeds fixed array capacity {field.get('capacity')}."
-        if kind == "string_array" and n > int(field.get("token_capacity", 10000)) - 1:
-            return False, f"n={n} exceeds string-array token capacity {int(field.get('token_capacity', 10000)) - 1}."
-        if kind == "repeated2d":
-            rows = int(field.get("row_capacity", 10000))
-            cols = int(field.get("col_capacity", 10000))
-            if n > rows or n > cols:
-                return False, f"n={n} exceeds fixed matrix capacity {rows}x{cols}."
-        if kind in ("string", "line"):
-            cap = int(field.get("capacity", 10000))
-            usable = max(0, cap - (1 if kind == "string" else 2))
-            if n > usable:
-                return False, f"n={n} exceeds input buffer capacity {usable}."
-    return True, None
+    for n in planned:
+        if len(measurements) >= max_success:
+            break
+        attempted.add(n)
+        succeeded = run_one(n, False)
+        if succeeded is False:
+            fallback_triggered = True
+            fallback_phase = "search"
+            lower_successes = [row["n"] for row in measurements if row["n"] < n]
+            fallback_low = max(lower_successes, default=1)
+            fallback_high = n
+            break
+
+    while fallback_triggered and len(measurements) < max_success:
+        if fallback_phase == "search":
+            if fallback_high - fallback_low > 1:
+                candidate = (fallback_low + fallback_high) // 2
+                if candidate in attempted:
+                    # Find an untried midpoint within the active bracket.
+                    options = [x for x in range(fallback_low + 1, fallback_high)
+                               if x not in attempted]
+                    candidate = min(options, key=lambda x: abs(x - (fallback_low + fallback_high) / 2)) if options else None
+                if candidate is not None:
+                    attempted.add(candidate)
+                    succeeded = run_one(candidate, True)
+                    if succeeded is False:
+                        fallback_high = candidate
+                    elif succeeded is True:
+                        fallback_low = candidate
+                    continue
+            fallback_phase = "fill"
+            fallback_fill = fallback_low - 1
+
+        if fallback_phase == "fill":
+            while fallback_fill >= 2 and fallback_fill in attempted:
+                fallback_fill -= 1
+            if fallback_fill < 2:
+                break
+            candidate = fallback_fill
+            fallback_fill -= 1
+            attempted.add(candidate)
+            run_one(candidate, True)
+
+    attempted_sizes = sorted(attempted)
+    if fallback_triggered:
+        stopping = ("Timeout fallback completed; smaller dimensions were tested. "
+                    f"Attempted sizes: {attempted_sizes}.")
+    else:
+        stopping = "Benchmark schedule completed without a program timeout."
+    return measurements, validation, timeout_count, len(attempted), stopping
 
 
-def _legacy_scaled_input(input_type: str, n: int, seed: int = 17):
-    """Compatibility fallback for the input types exposed by the existing UI."""
-    rng = random.Random(seed + int(n))
-    if input_type == "string":
-        return "".join(chr(rng.randint(97, 122)) for _ in range(n)) + "\n"
-    if input_type == "integer_array":
-        values = [str(rng.randint(1, 100)) for _ in range(n)]
-        return f"{n}\n" + " ".join(values) + "\n"
-    if input_type == "raw_array":
-        return " ".join(str(rng.randint(1, 100)) for _ in range(n)) + "\n"
-    if input_type == "single_number":
-        return f"{n}\n"
-    if input_type == "fixed_arithmetic":
-        if "log" in expected_complexity.lower():
-            # For logarithmic arithmetic (GCD, LCM, modular operations, binary pow),
-            # consecutive Fibonacci numbers (F_{k+1}, F_k) force logarithmic step counts (Lame's Theorem).
-            fib_pairs = {
-                13: (21, 13),
-                55: (89, 55),
-                233: (377, 233),
-                987: (1597, 987),
-                4181: (6765, 4181),
-                17711: (28657, 17711),
-                75025: (121393, 75025),
-                317811: (514229, 317811),
+def _repair_string_dimensions_from_source(spec: dict, source: str) -> dict:
+    """Make character-buffer inputs scale with N, independent of input_spec version.
+
+    The LLM's semantic analysis remains authoritative for which values are input
+    fields. The C declaration is authoritative for their storage type. If an
+    analyzed input is a char array/pointer but its generation plan says scalar,
+    count=1, or another non-scaling shape, repair that plan before serialization.
+    This deliberately lives in the estimator too: app/agent module reloads must
+    not be able to silently bypass the safety correction.
+    """
+    analysis = spec.setdefault("analysis", {})
+    input_info = analysis.setdefault("input", {})
+    generation = analysis.setdefault("input_generation", {})
+    input_fields = input_info.get("fields")
+    plan = generation.get("fields")
+    if not isinstance(input_fields, list):
+        input_fields = []
+    if not isinstance(plan, list):
+        plan = []
+
+    # Preserve source offsets and ignore declarations inside comments/literals.
+    masked = _mask_comments_strings(source)
+    declarations = {}
+    decl_re = re.compile(
+        r"\bchar\s*(?P<pointers>\*+\s*)?(?P<name>[A-Za-z_]\w*)\s*"
+        r"(?P<array>\[\s*(?P<capacity>\d*)\s*\])?"
+    )
+    for match in decl_re.finditer(masked):
+        name = match.group("name")
+        pointer = bool(match.group("pointers"))
+        array = match.group("array") is not None
+        if pointer or array:
+            dtype = "char" + (" *" if pointer else "")
+            if array:
+                dtype += f"[{match.group('capacity')}]"
+            declarations[name] = dtype
+
+    def root(value):
+        match = re.match(r"\s*([A-Za-z_]\w*)", str(value or ""))
+        return match.group(1) if match else ""
+
+    # Input-field metadata identifies which char buffers are actual stdin fields.
+    declared_inputs = {}
+    for field in input_fields:
+        if not isinstance(field, dict):
+            continue
+        name = root(field.get("variable"))
+        if not name:
+            continue
+        dtype = str(field.get("declared_type", "")).lower().replace(" ", "")
+        source_dtype = declarations.get(name, "")
+        is_char_buffer = (
+            ("char" in dtype and ("[" in dtype or "*" in dtype))
+            or bool(source_dtype)
+        )
+        if is_char_buffer:
+            declared_inputs[name] = source_dtype or str(field.get("declared_type", "char[]"))
+
+    # A single char buffer present in the generation plan but absent from the
+    # descriptive fields is still unambiguously a string input if Ollama gave
+    # us its variable and C declares it as a buffer.
+    for field in plan:
+        if not isinstance(field, dict):
+            continue
+        name = root(field.get("variable"))
+        if name in declarations:
+            declared_inputs.setdefault(name, declarations[name])
+
+    if not declared_inputs:
+        return spec
+
+    plan_by_name = {root(f.get("variable")): f for f in plan if isinstance(f, dict)}
+    input_by_name = {root(f.get("variable")): f for f in input_fields if isinstance(f, dict)}
+    for name, dtype in declared_inputs.items():
+        field = plan_by_name.get(name)
+        if field is None:
+            field = {
+                "variable": name,
+                "position": int(input_by_name.get(name, {}).get("position", len(plan) + 1)),
             }
-            if n in fib_pairs:
-                a, b = fib_pairs[n]
-                return f"{a} {b}\n"
-            phi = 1.6180339887
-            companion = max(1, int(round(n * phi)))
-            return f"{companion} {n}\n"
+            plan.append(field)
+            plan_by_name[name] = field
+        # This is the key repair: a char buffer is a variable-length string,
+        # not a scalar char. Its generated length must be the benchmark N.
+        field.update({
+            "variable": name,
+            "shape": "string",
+            "element_type": "char",
+            "count": "N",
+            "line_mode": "one_line",
+            "value_profile": "text",
+        })
+        field.pop("fixed_value", None)
+        if name not in input_by_name:
+            input_field = {
+                "variable": name,
+                "position": int(field.get("position", len(input_fields) + 1)),
+                "declared_type": dtype,
+                "read_function": "stdin/helper",
+                "description": f"Character buffer input {name}.",
+                "constraints": [],
+            }
+            input_fields.append(input_field)
+            input_by_name[name] = input_field
+        else:
+            input_by_name[name]["declared_type"] = dtype
 
-        return f"{n} {n + 7}\n"
-    raise ValueError("No supported input contract was inferred and no compatible input_type was configured.")
+    generation["fields"] = sorted(
+        plan, key=lambda f: int(f.get("position", 0)) if isinstance(f, dict) else 0
+    )
+    input_info["fields"] = sorted(
+        input_fields, key=lambda f: int(f.get("position", 0)) if isinstance(f, dict) else 0
+    )
+    return spec
 
 
-def _select_input_sizes(params: dict):
+def _audit_materialized_batch(spec: dict, raw_inputs: dict[int, str]) -> dict:
+    """Audit generated stdin without requiring a particular input_spec version.
+
+    Older installed copies of analyzers.input_spec may not expose the public
+    validator. Keep this compatibility check in the estimator so mixed module
+    versions fail safely rather than raising AttributeError.
+    """
+    validator = getattr(_input_spec, "validate_materialized_batch", None)
+    if callable(validator):
+        return validator(spec, raw_inputs)
+
+    if not raw_inputs:
+        raise ValueError("Input materializer produced an empty benchmark batch.")
+
+    fields = (spec.get("analysis", {})
+                  .get("input_generation", {})
+                  .get("fields", []))
+
+    def depends_on_n(expression):
+        if isinstance(expression, int):
+            return False
+        return bool(re.search(r"\b(?:N|PRIMARY_N)\b", str(expression), re.IGNORECASE))
+
+    scaling_fields = []
+    for field in fields:
+        shape = str(field.get("shape", "scalar")).lower()
+        count = field.get("count", 1)
+        scalable_shapes = {
+            "string", "line", "char_line", "sequence", "array",
+            "integer_array", "float_array", "string_array",
+            "matrix", "sequence2d", "2d",
+        }
+        if shape in scalable_shapes and depends_on_n(count):
+            scaling_fields.append(str(field.get("variable", "<unnamed>")))
+        if shape == "string_array" and depends_on_n(field.get("inner_count", 8)):
+            scaling_fields.append(str(field.get("variable", "<unnamed>")) + "[width]")
+
+    lengths = {int(n): len(raw.encode("utf-8")) for n, raw in raw_inputs.items()}
+    if scaling_fields and len(lengths) >= 2 and len(set(lengths.values())) == 1:
+        raise ValueError(
+            "Generated stdin has identical byte length for every requested N, "
+            "although the input schema declares N-dependent fields "
+            f"({', '.join(sorted(set(scaling_fields)))}). Refusing to profile "
+            f"non-scaling input. stdin byte lengths: {lengths}."
+        )
+    return {
+        "method": "estimator_compatibility_audit",
+        "dimensions": sorted(int(n) for n in raw_inputs),
+        "stdin_bytes": lengths,
+        "scaling_fields": sorted(set(scaling_fields)),
+        "distinct_payload_lengths": len(set(lengths.values())),
+        "warning": "input_spec.validate_materialized_batch unavailable; estimator-side audit used",
+    }
+
+
+def _evaluate_universal(source_path: str, params: dict, limits: dict):
+    source_path = os.path.abspath(os.path.expanduser(os.fspath(source_path)))
+    if not os.path.isfile(source_path):
+        raise FileNotFoundError(f"Source file does not exist: {source_path}")
+
+    timeout = float(limits.get("time_limit_s", 15.0))
+    min_success = max(5, int(params.get("min_successful_measurements", 5)))
+    max_success = max(min_success, int(params.get("max_measurements", 7)))
+    max_n = max(2, int(params.get("adaptive_max_n", 256)))
+    fixed_sizes = [int(x) for x in params.get("input_sizes", [])]
+    adaptive = bool(params.get("adaptive_input_sizes", not bool(fixed_sizes)))
+    with open(source_path, encoding="utf-8", errors="replace") as source_handle:
+        source_for_schedule = source_handle.read()
+    branching_recursion = _has_multi_branch_recursion(source_for_schedule)
+    dimensions = _benchmark_dimensions(
+        params, max_n, min_success, max_success, adaptive,
+        branching_recursion=branching_recursion,
+    )
+    if not adaptive and len(dimensions) < min_success:
+        raise ValueError(f"At least {min_success} distinct input_sizes are required for a reliable fit.")
+    if any(n < 2 for n in dimensions):
+        raise ValueError("Every benchmark dimension must be at least 2.")
+
+    supplied_spec = params.get("input_spec")
+    if supplied_spec is not None:
+        # Do not validate a potentially stale caller-provided schema yet.
+        # Reconcile its structure against the actual C source first.
+        spec = supplied_spec
+        if not spec.get("generation_context"):
+            with open(source_path, encoding="utf-8", errors="replace") as handle:
+                source_context = handle.read()
+            spec["generation_context"] = {
+                "source": params.get("oracle_source") or source_context,
+                "sample_input": params.get("sample_input", ""),
+                "problem_description": params.get("problem_description", ""),
+                "model": params.get("ollama_model", _input_spec.DEFAULT_MODEL),
+                "base_url": params.get("ollama_url", _input_spec.DEFAULT_URL),
+            }
+    elif params.get("input_builder") is not None:
+        spec = None
+    else:
+        spec, _ = _input_spec.load_or_analyze(
+            source_path,
+            spec_dir=params.get("input_spec_dir"),
+            model=params.get("ollama_model", _input_spec.DEFAULT_MODEL),
+            base_url=params.get("ollama_url", _input_spec.DEFAULT_URL),
+            timeout=float(params.get("ollama_timeout_s", 60)),
+            force=bool(params.get("force_input_analysis", False)),
+            sample_input=params.get("sample_input"),
+            problem_description=params.get("problem_description"),
+            oracle_source=params.get("oracle_source"),
+        )
+
+    if spec is not None:
+        # Last-chance source-authoritative normalization immediately before
+        # input sizing/materialization. This also handles schemas passed by app.py.
+        normalizer = getattr(_input_spec, "_normalize_schema_against_source", None)
+        if callable(normalizer):
+            normalizer(spec, source_for_schedule)
+        _repair_string_dimensions_from_source(spec, source_for_schedule)
+        _input_spec._validate(spec, source_for_schedule)
+
+    safe_n = _input_spec.maximum_safe_dimension(spec) if spec is not None else None
+    if safe_n is not None:
+        dimensions = [n for n in dimensions if n <= safe_n]
+    if len(dimensions) < min_success:
+        raise ValueError(
+            f"Only {len(dimensions)} requested dimensions fit the inferred safe input capacity; "
+            f"at least {min_success} are required."
+        )
+
+    builder = params.get("input_builder")
+    raw_inputs: dict[int, str] = {}
+    generation_diagnostics = []
+    generation_started = time.monotonic()
+    if builder:
+        for n in dimensions:
+            raw = builder(n)
+            if not isinstance(raw, str) or not raw.strip():
+                raise ValueError(f"Custom input_builder returned empty/non-string stdin for N={n}.")
+            raw_inputs[n] = raw.rstrip("\n") + "\n"
+    else:
+        # Materialize each payload directly. Do not call generate_stdin_batch:
+        # older cached/imported input_spec versions may implement that wrapper
+        # by calling a validator that is absent from the same module version.
+        # The primitive materialize_stdin API is the stable contract.
+        normalizer = getattr(_input_spec, "_normalize_schema_against_source", None)
+        if callable(normalizer):
+            normalizer(spec, source_for_schedule)
+        _repair_string_dimensions_from_source(spec, source_for_schedule)
+        _input_spec._validate(spec, source_for_schedule)
+        materializer = getattr(_input_spec, "materialize_stdin", None)
+        if not callable(materializer):
+            raise RuntimeError(
+                "Loaded analyzers.input_spec module has no materialize_stdin() function. "
+                f"Loaded module: {getattr(_input_spec, '__file__', '<unknown>')}"
+            )
+        raw_inputs = {
+            int(n): materializer(spec, int(n), seed=int(params.get("seed", 17)))
+            for n in dimensions
+        }
+        audit = _audit_materialized_batch(spec, raw_inputs)
+        generation_diagnostics.append({"valid": True, **audit})
+    generation_elapsed = time.monotonic() - generation_started
+
+    with tempfile.TemporaryDirectory(prefix="cgrade-complexity-") as directory:
+        binary = os.path.join(directory, "profiled_program")
+        boundary = compile_instrumented(
+            source_path, binary, compiler=params.get("compiler", "gcc"),
+            optimization=params.get("optimization", "-O0"),
+        )
+        generation_cache = dict(raw_inputs)
+
+        def get_input(n: int) -> str:
+            if n in generation_cache:
+                return generation_cache[n]
+            if builder:
+                raw = builder(n)
+                if not isinstance(raw, str) or not raw.strip():
+                    raise ValueError(f"Custom input_builder returned empty/non-string stdin for N={n}.")
+                value = raw.rstrip("\n") + "\n"
+            else:
+                value = _input_spec.materialize_stdin(spec, n, seed=int(params.get("seed", 17)))
+            generation_cache[n] = value
+            return value
+
+        (measurements, validation, timeout_count, attempt_count,
+         adaptive_stopping_reason) = _collect_with_timeout_fallback(
+            binary, dimensions, get_input, timeout, max_success
+        )
+
+        methods = sorted({row["method"] for row in measurements})
+        plot_data = sorted(
+            [{"n": row["n"], "cost": row["cost"], "method": row["method"]}
+             for row in measurements], key=lambda row: row["n"])
+        if len(measurements) < min_success:
+            fit = {"complexity": "inconclusive", "confidence": "low",
+                   "reason": f"Only {len(measurements)} successful measurements; at least {min_success} are required."}
+            return {"status": "inconclusive", "boundary": boundary,
+                    "validation": validation, "measurements": measurements,
+                    "input_sizes": [r["n"] for r in measurements], "plot_data": plot_data,
+                    "fit": fit, "feedback": fit["reason"], "profiling_methods": methods,
+                    "input_type": _input_type_label(spec, params),
+                    "timeout_count": timeout_count, "attempt_count": attempt_count,
+                    "adaptive_mode": adaptive,
+                    "adaptive_stopping_reason": adaptive_stopping_reason,
+                    "input_generation_elapsed_s": round(generation_elapsed, 6),
+                    "input_generation_diagnostics": generation_diagnostics}
+
+        fit = fit_growth(measurements, params.get("fit_config", {}))
+        boundary["measurement_method"] = ", ".join(methods)
+        return {"status": "measured", "boundary": boundary, "validation": validation,
+                "measurements": measurements, "input_sizes": [r["n"] for r in measurements],
+                "plot_data": plot_data, "profiling_methods": methods, "fit": fit,
+                "measurement_note": "All accepted measurements are Callgrind Ir instruction counts summed across all dump intervals.",
+                "input_type": _input_type_label(spec, params),
+                "timeout_count": timeout_count, "attempt_count": attempt_count,
+                "adaptive_mode": adaptive,
+                "adaptive_stopping_reason": adaptive_stopping_reason,
+                "input_generation_elapsed_s": round(generation_elapsed, 6),
+                "input_generation_diagnostics": generation_diagnostics}
+
+
+def _input_type_label(spec: Optional[dict], params: dict) -> str:
+    """Return the legacy comma-separated input-kind label."""
+    if params.get("input_type"):
+        return str(params["input_type"])
+    if not spec:
+        return "custom_or_unknown"
+    analysis = spec.get("analysis", {})
+    declared = analysis.get("input", {}).get("fields", [])
+    kinds = set()
+    for field in declared:
+        dtype = str(field.get("declared_type", "")).lower().replace(" ", "")
+        if not dtype:
+            continue
+        if "char" in dtype or "string" in dtype:
+            kinds.add("string_array" if ("**" in dtype or "[][]" in dtype) else "string")
+        elif ("[][]" in dtype or "**" in dtype) and any(
+                token in dtype for token in ("int", "long", "short", "float", "double", "size_t", "number")):
+            kinds.add("repeated2d")
+        elif ("[" in dtype or "*" in dtype or "array" in dtype) and any(
+                token in dtype for token in ("int", "long", "short", "float", "double", "size_t", "number", "integer")):
+            kinds.add("repeated")
+        elif any(token in dtype for token in ("int", "long", "short", "float", "double", "size_t", "integer")):
+            kinds.add("number")
+    if kinds:
+        return ", ".join(sorted(kinds))
+    fields = analysis.get("input_generation", {}).get("fields", [])
+    legacy_names = {"integer": "number", "float": "number", "integer_array": "repeated",
+                    "float_array": "repeated", "repeated": "repeated", "string": "string",
+                    "string_array": "string_array", "matrix": "repeated2d"}
+    kinds = {legacy_names.get(str(f.get("generator", {}).get("kind", "unknown")),
+                              str(f.get("generator", {}).get("kind", "unknown"))) for f in fields}
+    return ", ".join(sorted(kinds)) if kinds else "custom_or_unknown"
+
+
+def _select_input_sizes(params: dict) -> list[int]:
     if params.get("input_sizes"):
         return [int(value) for value in params["input_sizes"]]
     if params.get("trials") and params.get("base_n") is not None and params.get("scale_step") is not None:
@@ -589,363 +1100,61 @@ def _select_input_sizes(params: dict):
     return [4, 8, 16, 32, 64, 128, 256]
 
 
-def _default_inputs(source: str, n: int):
-    """Generate an input using the input-contract logic embedded in this file.
-
-    V4 is deliberately self-contained: C-Grade Engine must not need V3 on
-    sys.path or in the working directory merely to generate benchmark inputs.
-    """
-    contract = infer_input_contract(source)
-    if not contract.get("supported"):
-        raise ValueError(contract.get("reason", "Could not infer a supported input format."))
-    return make_input(contract, n)
-
-def _compatibility_error(message: str) -> dict:
-    """Return the result shape expected by the existing C-Grade Engine."""
-    return {
-        'score': 0.0,
-        'evidence': {'error': message, 'detected_complexity': 'inconclusive'},
-        'feedback': f'Evaluation failed: {message}'
-    }
-
-
-def _complexity_rank(label: str):
-    """Compare predefined complexity candidates by asymptotic growth."""
-
-    value = (label or "").strip().lower().replace(" ", "")
-    value = value.replace("n", "N").replace("N", "n")
-
-    ranks = {
-        "o(1)": (0, 0),
-
-        "o(logn)": (1, 0),
-
-        "o(n)": (2, 1),
-        "o(n^2)": (2, 2),
-        "o(n^3)": (2, 3),
-
-        "o(nlogn)": (3, 1),
-        "o(n^2logn)": (3, 2),
-
-        "o(1.5^n)": (4, 1.5),
-        "o(2^n)": (4, 2),
-        "o(3^n)": (4, 3),
-
-        "o(n^1*1.5^n)": (5, 1.5),
-        "o(n^2*1.5^n)": (5, 1.5),
-        "o(n^1*2^n)": (5, 2),
-        "o(n^2*2^n)": (5, 2),
-        "o(n^1*3^n)": (5, 3),
-        "o(n^2*3^n)": (5, 3),
-
-        "o(n!)": (6, 1),
-        "o(n^1*n!)": (7, 1),
-        "o(n^2*n!)": (7, 2),
-    }
-
-    return ranks.get(value)
-
-
-def evaluate(source_path: str, binary_path: str, params: dict, limits: dict = None) -> dict:
-    """C-Grade-compatible entry point; keeps the legacy API and result schema.
-
-    `binary_path` is accepted for compatibility with the existing analyzer
-    interface. V4 builds a separate instrumented copy of `source_path` because
-    the supplied executable is not instrumented at the measurement boundary.
-    """
+def evaluate(source_path: str, binary_path: Optional[str] = None,
+             params: Optional[dict] = None, limits: Optional[dict] = None) -> dict:
+    """C-Grade-compatible entry point; result/evidence shape is unchanged."""
     params = params or {}
     limits = limits or {}
-
     if not source_path:
-        return _compatibility_error('Student source file not found.')
-    resolved_source = os.path.abspath(os.path.expanduser(os.fspath(source_path)))
-    if not os.path.isfile(resolved_source):
-        return _compatibility_error(f'Student source file not found: {source_path}')
+        return _compatibility_error("Student source file not found.")
+    resolved = os.path.abspath(os.path.expanduser(os.fspath(source_path)))
+    if not os.path.isfile(resolved):
+        return _compatibility_error(f"Student source file not found: {source_path}")
 
     try:
-        with open(resolved_source, encoding='utf-8', errors='ignore') as handle:
-            source = handle.read()
-    except OSError as exc:
-        return _compatibility_error(f'Could not read student source: {exc}')
-
-    try:
-        contract = infer_input_contract(source)
-        fields = contract.get("fields", [])
-        kinds = sorted({field.get("kind", "unknown") for field in fields})
-        input_kind = ", ".join(kinds) if kinds else "custom_or_unknown"
-    except Exception:
-        input_kind = 'custom_or_unknown'
-
-    try:
-        result = _evaluate_universal(resolved_source, params, limits)
+        result = _evaluate_universal(resolved, params, limits)
     except Exception as exc:
-        return _compatibility_error(f'Complexity profiling failed: {type(exc).__name__}: {exc}')
+        return _compatibility_error(f"Complexity profiling failed: {type(exc).__name__}: {exc}")
 
-    fit = result.get('fit', {'complexity': 'inconclusive', 'confidence': 'low'})
-    detected = fit.get('complexity', 'inconclusive')
-    expected = params.get('expected_complexity', 'O(N)')
+    fit = result.get("fit", {"complexity": "inconclusive", "confidence": "low"})
+    detected = fit.get("complexity", "inconclusive")
+    expected = params.get("expected_complexity", "O(N)")
     detected_rank = _complexity_rank(detected)
     expected_rank = _complexity_rank(expected)
-
-    generic_family = fit.get('generic_family', 'Unclassified')
-
-    if detected_rank is None or expected_rank is None or detected == 'inconclusive':
+    if detected_rank is None or expected_rank is None or detected == "inconclusive":
         score = 0.5
-        feedback = (
-            f'Estimated {detected} ({generic_family}); comparison with expected '
-            f'{expected} is inconclusive.'
-        )
+        feedback = (f"Complexity estimate is inconclusive or outside the configured comparison scale "
+                    f"(detected {detected}, expected {expected}).")
     elif detected_rank <= expected_rank:
         score = 1.0
-        feedback = (
-            f'Estimated {detected} ({generic_family}), which is consistent with '
-            f'or better than expected {expected}.'
-        )
+        feedback = f"Estimated {detected}; this is consistent with or better than expected {expected}."
     else:
         score = 0.4
-        feedback = (
-            f'Estimated {detected} ({generic_family}), which is worse than '
-            f'expected {expected}.'
-        )
+        feedback = f"Estimated {detected}, which is worse than expected {expected}."
 
-    methods = result.get('profiling_methods', [])
-    mode = ', '.join(methods) if methods else 'unavailable'
+    methods = result.get("profiling_methods", [])
     return {
-        'score': score,
-        'evidence': {
-            'input_type': input_kind,
-            'profiling_method': mode,
-            'counter': result.get('measurement_note', 'Runtime execution events'),
-            'expected_complexity': expected,
-            'detected_complexity': detected,
-            'generic_complexity_family': generic_family,
-            'fit': fit,
-            'trials': result.get('measurements', []),
-            'input_sizes': result.get('input_sizes', _select_input_sizes(params)),
-            'validation': result.get('validation', []),
-            'measurement_boundary': result.get('boundary'),
-            'profiling_diagnostics': result.get('validation', []),
-            'binary_path_used': False,
-            'adaptive_mode': result.get('adaptive_mode', False),
-            'adaptive_stopping_reason': result.get('adaptive_stopping_reason')
+        "score": score,
+        "evidence": {
+            "input_type": result.get("input_type", params.get("input_type", "custom_or_unknown")),
+            "profiling_method": ", ".join(methods) if methods else "unavailable",
+            "counter": result.get("measurement_note", "Callgrind instruction counts"),
+            "expected_complexity": expected,
+            "detected_complexity": detected,
+            "fit": fit,
+            "trials": result.get("measurements", []),
+            "plot_data": result.get("plot_data", result.get("measurements", [])),
+            "timeout_count": result.get("timeout_count", 0),
+            "attempt_count": result.get("attempt_count"),
+            "input_sizes": result.get("input_sizes", _select_input_sizes(params)),
+            "validation": result.get("validation", []),
+            "measurement_boundary": result.get("boundary"),
+            "profiling_diagnostics": result.get("validation", []),
+            "binary_path_used": False,
+            "adaptive_mode": result.get("adaptive_mode", False),
+            "adaptive_stopping_reason": result.get("adaptive_stopping_reason"),
+            "input_generation_elapsed_s": result.get("input_generation_elapsed_s"),
+            "input_generation_diagnostics": result.get("input_generation_diagnostics", []),
         },
-        'feedback': feedback
+        "feedback": feedback,
     }
-
-
-def _adaptive_benchmark_sizes(params: dict):
-    """Choose adaptive sizing by default, including when legacy sizes exist.
-
-    Older C-Grade configurations commonly pass ``input_sizes`` containing a
-    generic schedule such as [10, 30, 50, 70, 90]. Treating that list as a
-    mandatory fixed schedule makes exponential programs time out before enough
-    measurements are collected. Adaptive sizing is therefore the default.
-
-    Set ``adaptive_input_sizes=False`` to explicitly request the legacy fixed
-    schedule. ``input_sizes`` remains available to fixed-mode callers.
-    """
-    adaptive = bool(params.get("adaptive_input_sizes", True))
-    if adaptive:
-        return True, []
-    return False, _select_input_sizes(params)
-
-
-def _next_adaptive_size(last_n: int, last_cost: int, previous_cost: int,
-                        previous_n: int, elapsed: float, params: dict,
-                        successful_measurements: int = 0) -> int:
-    """Choose the next input size without stopping on a slow first trial.
-
-    Wall-clock time includes process startup and instrumentation overhead. It
-    is used only to reduce the next step, never to stop before the required
-    number of successful observations has been collected.
-    """
-    min_step = max(1, int(params.get('adaptive_min_step', 1)))
-    max_step = max(min_step, int(params.get('adaptive_max_step', 12)))
-    target = float(params.get('adaptive_trial_target_s', 0.35))
-
-    ratio = None
-    if previous_cost and previous_n is not None and last_n > previous_n:
-        ratio = last_cost / max(1, previous_cost)
-
-    # Slow trial or sharp counter growth: increase by the smallest safe step.
-    if elapsed >= target or (ratio is not None and ratio >= 4.0):
-        step = min_step
-    else:
-        # For inexpensive workloads, grow the step gradually to reach useful
-        # sizes without requiring many tiny benchmark runs.
-        step = min(max_step, max(min_step, int(round(last_n * 0.30))))
-
-    return last_n + step
-
-
-def _measurements_nearly_flat(measurements, params: dict) -> bool:
-    """Return True when the initial size sweep shows too little counter growth.
-
-    The test is intentionally relative to the measured total, because Callgrind
-    counts include fixed runtime overhead even though counting starts after
-    input. It only triggers a wider sweep; it never selects a complexity.
-    """
-    rows = [row for row in measurements if row.get("cost", 0) > 0]
-    minimum = max(5, int(params.get("adaptive_flat_min_measurements", 8)))
-    if len(rows) < minimum:
-        return False
-    ns = [int(row["n"]) for row in rows]
-    costs = [float(row["cost"]) for row in rows]
-    if min(ns) <= 0 or max(ns) < min(ns) * float(params.get("adaptive_flat_min_size_ratio", 4.0)):
-        return False
-    median_cost = statistics.median(costs)
-    if median_cost <= 0:
-        return False
-    relative_span = (max(costs) - min(costs)) / median_cost
-    return relative_span <= float(params.get("adaptive_flat_relative_span", 0.01))
-
-
-def _evaluate_universal(source_path: str, params: dict, limits: dict):
-    """Internal V4 implementation with adaptive benchmark-size selection.
-
-    Input inference, generation, instrumentation and profiling remain the same.
-    Only the choice and stopping of benchmark sizes is adaptive. Explicit
-    input_sizes preserve the old fixed-size behaviour unless adaptive sizing
-    is explicitly requested.
-    """
-    source_path = os.path.abspath(os.path.expanduser(os.fspath(source_path)))
-    if not os.path.isfile(source_path):
-        raise FileNotFoundError(f'Source file does not exist: {source_path}')
-    with open(source_path, encoding='utf-8', errors='ignore') as handle:
-        source = handle.read()
-
-    adaptive, fixed_sizes = _adaptive_benchmark_sizes(params)
-    timeout = float(limits.get('time_limit_s', 5.0))
-    min_measurements = max(5, int(params.get('min_successful_measurements', 5)))
-    # Keep the original small-size pass, but reserve additional runs for a
-    # second, wider pass when fixed profiling overhead hides the growth signal.
-    max_measurements = max(min_measurements, int(params.get('max_measurements', 16)))
-    initial_measurements = max(5, int(params.get('adaptive_initial_measurements', 10)))
-    initial_measurements = min(initial_measurements, max_measurements)
-    start_n = max(1, int(params.get('adaptive_start_n', 2)))
-    max_n = max(start_n, int(params.get('adaptive_max_n', 131072)))
-    contract = infer_input_contract(source)
-
-    with tempfile.TemporaryDirectory(prefix='cgrade-universal-') as td:
-        exe = os.path.join(td, 'profiled_program')
-        use_callgrind = bool(shutil.which('valgrind') and os.path.exists('/usr/include/valgrind/callgrind.h'))
-        instruction_counts_only = bool(params.get('instruction_counts_only', True))
-        if instruction_counts_only and not use_callgrind:
-            raise RuntimeError(
-                'Instruction-count profiling requires Valgrind Callgrind and its development headers. '
-                'Install them in WSL/Linux, or explicitly set instruction_counts_only=False to allow '
-                'the labelled SanitizerCoverage/GCC proxy fallback.'
-            )
-        boundary = compile_instrumented(source_path, exe, params.get('compiler', 'clang'), callgrind_header=use_callgrind)
-        if use_callgrind:
-            boundary['counter_mode'] = 'callgrind_instructions'
-        measurements = []
-        validation = []
-        builder = params.get('input_builder')
-        attempted_sizes = []
-        next_n = start_n
-        previous_n = None
-        previous_cost = None
-        stop_reason = None
-        expansion_mode = False
-
-        while len(attempted_sizes) < (max_measurements if adaptive else len(fixed_sizes)):
-            n = next_n if adaptive else fixed_sizes[len(attempted_sizes)]
-            if n > max_n and adaptive:
-                stop_reason = f'adaptive maximum input size ({max_n}) reached'
-                break
-            attempted_sizes.append(n)
-            started = time.monotonic()
-            try:
-                if not builder and contract.get("supported"):
-                    size_ok, size_reason = validate_input_size(contract, int(n))
-                    if not size_ok:
-                        validation.append({'n': n, 'valid': False, 'reason': size_reason})
-                        if adaptive:
-                            stop_reason = size_reason
-                            break
-                        continue
-                if builder:
-                    data = builder(n)
-                elif contract.get("supported"):
-                    data = make_input(contract, n)
-                else:
-                    data = _legacy_scaled_input(params.get("input_type", ""), n, int(params.get("seed", 17)))
-                measured = profile_one(
-                    exe, data, timeout,
-                    instruction_counts_only=instruction_counts_only
-                )
-                elapsed = time.monotonic() - started
-                if boundary.get('counter_mode') == 'gcc_function_entry_proxy' and measured['method'] != 'callgrind_instructions':
-                    measured['method'] = 'gcc_function_entry_events'
-                measurements.append({'n': n, 'cost': measured['cost'], 'method': measured['method'],
-                                     'elapsed_s': round(elapsed, 6)})
-                validation.append({'n': n, 'valid': True, 'elapsed_s': round(elapsed, 6)})
-                if adaptive:
-                    previous_n, previous_cost = n, measured['cost']
-
-                    # A nearly flat counter series can mean that fixed process /
-                    # instrumentation overhead is hiding the algorithmic work.
-                    # Do not keep adding nearby sizes: deliberately widen the
-                    # range geometrically and collect more observations.
-                    if (not expansion_mode and
-                            len(measurements) >= initial_measurements and
-                            _measurements_nearly_flat(measurements, params)):
-                        expansion_mode = True
-                        next_n = max(n + 1, int(math.ceil(n * float(
-                            params.get('adaptive_expansion_factor', 4.0)))))
-                    elif expansion_mode:
-                        factor = max(1.25, float(params.get('adaptive_expansion_factor', 4.0)))
-                        next_n = max(n + 1, int(math.ceil(n * factor)))
-                    else:
-                        next_n = _next_adaptive_size(
-                            n, measured['cost'],
-                            measurements[-2]['cost'] if len(measurements) > 1 else None,
-                            measurements[-2]['n'] if len(measurements) > 1 else None,
-                            elapsed, params, len(measurements)
-                        )
-
-                    # Defensive guard: adaptive schedules must always advance.
-                    if next_n <= n:
-                        next_n = n + max(1, int(params.get('adaptive_min_step', 1)))
-            except subprocess.TimeoutExpired:
-                validation.append({'n': n, 'valid': False, 'reason': 'timeout'})
-                if adaptive:
-                    # Do not keep probing larger inputs after a timeout. If
-                    # fewer than the required measurements exist, back off
-                    # once to the midpoint between the last success and the
-                    # failed candidate, then continue cautiously.
-                    if len(measurements) < min_measurements and previous_n is not None and n - previous_n > 1:
-                        next_n = previous_n + max(1, (n - previous_n) // 2)
-                        if next_n < n:
-                            continue
-                    stop_reason = 'stopped increasing input size after a timeout'
-                    break
-            except Exception as exc:
-                validation.append({'n': n, 'valid': False, 'reason': str(exc)})
-                if adaptive:
-                    stop_reason = f'input generation or profiling failed: {exc}'
-                    break
-
-        actual_sizes = attempted_sizes
-        if len(measurements) < min_measurements:
-            result = {'status': 'inconclusive', 'boundary': boundary, 'validation': validation,
-                      'measurements': measurements, 'input_sizes': actual_sizes,
-                      'fit': {'complexity': 'inconclusive', 'confidence': 'low',
-                              'reason': f'Only {len(measurements)} successful measurements; at least {min_measurements} are required.'},
-                      'feedback': f'Only {len(measurements)} successful measurements; at least {min_measurements} are required.'}
-            if adaptive:
-                result['adaptive_stopping_reason'] = stop_reason or ('maximum measurement count reached after flat-series expansion' if expansion_mode else 'maximum measurement count reached')
-            return result
-
-        fit = fit_growth(measurements, params.get('fit_config', {}))
-        methods = sorted(set(item['method'] for item in measurements))
-        boundary['measurement_method'] = ', '.join(methods) if methods else 'unavailable'
-        result = {'status': 'measured', 'boundary': boundary, 'validation': validation,
-                  'measurements': measurements, 'input_sizes': actual_sizes,
-                  'profiling_methods': methods, 'fit': fit,
-                  'measurement_note': ('Callgrind instruction counts.' if methods and all(m == 'callgrind_instructions' for m in methods) else 'Clang SanitizerCoverage results are basic-block events; GCC fallback results are function-entry events. These are runtime-growth proxies, not machine-instruction counts.')}
-        if adaptive:
-            result['adaptive_stopping_reason'] = stop_reason or ('maximum measurement count reached after flat-series expansion' if expansion_mode else 'maximum measurement count reached')
-            result['adaptive_mode'] = True
-        return result
