@@ -595,55 +595,83 @@ def _extract_log_factor(expression: str):
 
 
 def _complexity_rank(label: str):
-    """Parse supported asymptotic labels into comparable lexicographic ranks.
+    """Return an ordered asymptotic signature for supported complexity labels.
 
-    Accepts equivalent log-power spellings such as log^2N, log(N)^2,
-    (logN)^2, and (log(N))^2. The returned rank is notation-independent.
+    Handles polynomial/logarithmic, exponential, factorial and variable-
+    exponent forms without depending on the finite UI option list.
     """
-    value = re.sub(r"\s+", "", (label or "").strip().lower())
+    value = re.sub(r"\s+", "", str(label or "").strip().lower())
     if not value.startswith("o(") or not value.endswith(")"):
         return None
-    body = value[2:-1]
+    body = value[2:-1].replace("×", "*").replace("·", "*")
+    body = body.replace("√(n)", "n^0.5").replace("sqrt(n)", "n^0.5")
+    body = body.replace("√n", "n^0.5").replace("sqrtn", "n^0.5")
+    body = body.replace("**", "^")
     if body in {"1", "1.0"}:
-        return (0, 0.0, 0.0, 0.0)
+        return (0, 0.0, 0.0, 0.0, 0.0)
 
-    factorial = re.search(r"\(n!\)(?:\^([0-9]+(?:\.[0-9]+)?))?|n!", body)
-    if factorial:
-        token = factorial.group(0)
-        exponent = float(factorial.group(1) or 1.0) if factorial.group(1) else 1.0
-        remainder = body.replace(token, "", 1)
-        exponential = re.search(r"([0-9]+(?:\.[0-9]+)?)\^n", remainder)
-        base_log = math.log(float(exponential.group(1))) if exponential and float(exponential.group(1)) > 1 else 0.0
-        if exponential:
-            remainder = remainder.replace(exponential.group(0), "", 1)
+    # N^(cN) and N^N grow on the exp(c*N*log(N)) scale.
+    variable_exp = re.search(
+        r"n\^\(?([0-9]+(?:\.[0-9]+)?)\*?n\)?", body
+    ) or re.search(r"n\^\(?n\)?", body)
+    if variable_exp:
+        token = variable_exp.group(0)
+        coefficient = float(variable_exp.group(1)) if variable_exp.lastindex else 1.0
+        remainder = body.replace(token, "", 1).strip("*.")
         q, remainder = _extract_log_factor(remainder)
-        poly_match = re.search(r"n\^([0-9]+(?:\.[0-9]+)?)", remainder)
-        p = float(poly_match.group(1)) if poly_match else (1.0 if "n" in remainder else 0.0)
-        return (4, exponent, base_log, p, q)
+        poly = re.search(r"n(?:\^([0-9]+(?:\.[0-9]+)?))?", remainder)
+        p = float(poly.group(1) or 1.0) if poly else 0.0
+        return (4, coefficient, 0.0, p, q)
 
-    exponential = re.search(r"([0-9]+(?:\.[0-9]+)?)\^n", body)
+    # (N!)^a or N!; Stirling gives a*N*log(N) - a*N.
+    factorial = re.search(r"(?:\(n!\)|n!)(?:\^([0-9]+(?:\.[0-9]+)?))?", body)
+    if factorial:
+        exponent = float(factorial.group(1) or 1.0)
+        remainder = body.replace(factorial.group(0), "", 1).strip("*.")
+        q, remainder = _extract_log_factor(remainder)
+        poly = re.search(r"n(?:\^([0-9]+(?:\.[0-9]+)?))?", remainder)
+        p = float(poly.group(1) or 1.0) if poly else 0.0
+        return (4, exponent, -exponent, p, q)
+
+    # c^N * polynomial/log factors. Compare exponential base first.
+    exponential = re.search(r"([0-9]+(?:\.[0-9]+)?)\^\(?n\)?", body)
     if exponential:
         base = float(exponential.group(1))
         if base <= 1.0:
             return None
-        remainder = body.replace(exponential.group(0), "", 1)
+        remainder = body.replace(exponential.group(0), "", 1).strip("*.")
         q, remainder = _extract_log_factor(remainder)
-        poly_match = re.search(r"n\^([0-9]+(?:\.[0-9]+)?)", remainder)
-        p = float(poly_match.group(1)) if poly_match else (1.0 if "n" in remainder else 0.0)
-        return (3, math.log(base), p, q)
+        poly = re.search(r"n(?:\^([0-9]+(?:\.[0-9]+)?))?", remainder)
+        p = float(poly.group(1) or 1.0) if poly else 0.0
+        return (3, math.log(base), p, q, 0.0)
 
-    loglog_match = re.search(r"loglog(?:\(n\)|n)", body)
-    loglog_power = 1.0 if loglog_match else 0.0
-    remainder = body.replace(loglog_match.group(0), "", 1) if loglog_match else body
+    # log(log(N)) factors are slower than every positive log(N) power.
+    loglog = re.search(r"loglog(?:\(n\)|n)", body)
+    loglog_power = 1.0 if loglog else 0.0
+    remainder = body.replace(loglog.group(0), "", 1) if loglog else body
     q, remainder = _extract_log_factor(remainder)
-    poly_match = re.search(r"n\^([0-9]+(?:\.[0-9]+)?)", remainder)
-    p = float(poly_match.group(1)) if poly_match else (1.0 if "n" in remainder else 0.0)
+
+    # Parse N^p, including explicit p=1 and decimal exponents.
+    poly = re.search(r"n\^\(?([0-9]+(?:\.[0-9]+)?)\)?", remainder)
+    if poly:
+        p = float(poly.group(1))
+        remainder = remainder.replace(poly.group(0), "", 1)
+    elif re.search(r"n", remainder):
+        p = 1.0
+        remainder = re.sub(r"n", "", remainder, count=1)
+    else:
+        p = 0.0
+
+    # Reject leftovers instead of silently mis-ranking malformed expressions.
+    remainder = remainder.strip("*.")
+    if remainder:
+        return None
     if p > 0:
-        return (2, p, q + 0.5 * loglog_power, 0.0)
+        return (2, p, q, loglog_power, 0.0)
     if q > 0:
-        return (1, q, 0.0, 0.0)
+        return (1, q, loglog_power, 0.0, 0.0)
     if loglog_power:
-        return (1, 0.5, 0.0, 0.0)
+        return (1, 0.0, loglog_power, 0.0, 0.0)
     return None
 
 
@@ -1416,10 +1444,19 @@ C SOURCE:
         "O(N*2^N)": "O(N^1 * 2^N)",
     }
     complexity = aliases.get(complexity, complexity)
-    if complexity not in candidate_labels:
+    # Canonicalize harmless formatting/case variations (e.g. O(2^n) ->
+    # O(2^N)) against the actual model candidates. Return the exact canonical
+    # spelling used by the fitter so downstream ranking remains deterministic.
+    normalized = re.sub(r"\\s+", "", complexity).upper()
+    canonical = {
+        re.sub(r"\\s+", "", label).upper(): label
+        for label in candidate_labels
+    }
+    complexity = canonical.get(normalized)
+    if complexity is None:
         raise ValueError(
             "Ollama returned a complexity label outside the supported candidate set: "
-            + repr(complexity)
+            + repr(response.get("complexity", ""))
         )
     confidence = str(response.get("confidence", "low")).lower()
     if confidence not in {"low", "medium"}:
@@ -1493,20 +1530,55 @@ def evaluate(source_path: str, binary_path: Optional[str] = None,
     if not os.path.isfile(resolved):
         return _compatibility_error(f"Student source file not found: {source_path}")
 
+    profiling_error = None
     try:
         result = _evaluate_universal(resolved, params, limits)
     except Exception as exc:
-        return _compatibility_error(f"Complexity profiling failed: {type(exc).__name__}: {exc}")
+        # Convert hard profiling/input-analysis failures into the same
+        # inconclusive result shape used by empirical fitting. Returning
+        # _compatibility_error() here would exit evaluate() before the
+        # Ollama fallback had a chance to run.
+        profiling_error = (
+            f"Complexity profiling failed: {type(exc).__name__}: {exc}"
+        )
+        result = {
+            "status": "profiling_failed",
+            "boundary": None,
+            "validation": [{
+                "n": None,
+                "valid": False,
+                "reason": profiling_error,
+                "stage": "profiling_or_input_analysis",
+            }],
+            "measurements": [],
+            "input_sizes": [],
+            "plot_data": [],
+            "profiling_methods": [],
+            "measurement_note": "No empirical Callgrind measurements were available.",
+            "input_type": params.get("input_type", "custom_or_unknown"),
+            "fit": {
+                "complexity": "inconclusive",
+                "confidence": "low",
+                "reason": profiling_error,
+                "warnings": ["Empirical profiling failed before measurements were collected."],
+                "competing_models": [],
+            },
+            "profiling_error": profiling_error,
+        }
 
     result = _attach_ollama_fallback(result, resolved, params)
     fit = result.get("fit", {"complexity": "inconclusive", "confidence": "low"})
     empirical_detected = fit.get("complexity", "inconclusive")
     fallback = fit.get("ollama_fallback", {})
     used_fallback = bool(fallback.get("used") and fallback.get("complexity"))
-    estimate_source = (
-        "Ollama source-analysis fallback"
-        if used_fallback else "Callgrind model fitting"
-    )
+    if used_fallback:
+        estimate_source = "Ollama source-analysis fallback"
+    elif result.get("status") == "profiling_failed" or profiling_error:
+        estimate_source = "Unavailable: profiling failed"
+    elif not result.get("measurements"):
+        estimate_source = "Unavailable: no empirical measurements"
+    else:
+        estimate_source = "Callgrind model fitting"
     detected = (
         fallback.get("complexity")
         if fallback.get("used") and fallback.get("complexity")
@@ -1517,14 +1589,14 @@ def evaluate(source_path: str, binary_path: Optional[str] = None,
     expected_rank = _complexity_rank(expected)
     if detected_rank is None or expected_rank is None or detected == "inconclusive":
         score = 0.5
-        feedback = (f"Complexity estimate is inconclusive or outside the configured comparison scale "
-                    f"(detected {detected}, expected {expected}).")
     elif detected_rank <= expected_rank:
         score = 1.0
-        feedback = f"Estimated {detected} this is consistent with or better than expected {expected}."
     else:
         score = 0.4
-        feedback = f"Estimated {detected} this is worse than expected {expected}."
+
+    # Keep the user-facing result deliberately concise and stable, regardless
+    # of whether the estimate came from profiling or the source fallback.
+    feedback = f"Estimated {detected} expected {expected}"
 
     methods = result.get("profiling_methods", [])
     return {
@@ -1539,6 +1611,7 @@ def evaluate(source_path: str, binary_path: Optional[str] = None,
             "complexity_estimate_source": estimate_source,
             "ollama_fallback": fallback if fallback else None,
             "fit": fit,
+            "profiling_error": result.get("profiling_error"),
             "trials": result.get("measurements", []),
             "plot_data": result.get("plot_data", result.get("measurements", [])),
             "timeout_count": result.get("timeout_count", 0),

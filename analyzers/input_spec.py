@@ -504,17 +504,23 @@ def _find_c_declaration(source: str, variable: str,
             # Remove only a top-level initializer; comparisons inside array
             # bounds or nested initializer expressions remain untouched.
             candidate = _strip_c_initializer(declarator)
+            # Accept zero or more array dimensions, e.g. a[100], cost[16][16].
+            # Keep the first dimension in `capacity` for backward compatibility.
             dm = re.fullmatch(
                 r"\s*(\*+\s*)?" + re.escape(variable) +
-                r"\s*(?:\[\s*([^\]]*)\s*\])?\s*",
+                r"\s*((?:\[\s*[^\]]*\s*\])*)\s*",
                 candidate,
             )
             if dm:
-                capacity = dm.group(2)
+                dimensions = [
+                    value.strip()
+                    for value in re.findall(r"\[\s*([^\]]*)\s*\]", dm.group(2))
+                ]
                 return {
                     "base_type": base_type,
                     "pointer": bool(dm.group(1)),
-                    "capacity": capacity.strip() if capacity is not None else None,
+                    "capacity": dimensions[0] if dimensions else None,
+                    "dimensions": dimensions,
                     "declaration_offset": match.start(),
                 }
     return None
@@ -526,14 +532,13 @@ def _infer_source_field(source: str, read: dict) -> tuple[dict, dict]:
     read_offset = read.get("source_offset")
     decl = _find_c_declaration(source, variable, read_offset)
     if decl is None:
-        # A declaration after the read offset can occur in unusual source
-        # layouts; retain a conservative whole-file fallback.
         decl = _find_c_declaration(source, variable)
     if decl is None:
         raise ValueError(
             f"Cannot safely infer stdin field {variable!r} from its C declaration; "
             "the input analysis must describe it explicitly."
         )
+
     base_type = decl["base_type"]
     pointer, capacity = decl["pointer"], decl["capacity"]
     expr, conv = read.get("expression", variable), read.get("conversion")
@@ -543,9 +548,15 @@ def _infer_source_field(source: str, read: dict) -> tuple[dict, dict]:
     ))
     repeated = bool(read.get("repeat_count"))
     is_char = "char" in base_type
-    if conv in {"s", "line", "c"} and is_char:
-        # Character arrays read as tokens, lines, or one character per call are
-        # serialized as contiguous text, never as space-separated char tokens.
+    index_count = len(re.findall(r"\[[^\]]+\]", expr))
+    repeat_bounds = read.get("repeat_bounds") or (
+        [read["repeat_count"]] if read.get("repeat_count") else []
+    )
+
+    if (not is_char and index_count >= 2
+            and str(read.get("repeat_expression", "")).upper() in {"N*M", "M*N"}):
+        shape = "matrix"
+    elif conv in {"s", "line", "c"} and is_char:
         shape = "string" if (not indexed or capacity is not None or pointer) else "sequence"
     elif conv == "s" or conv == "line":
         shape = "string" if not indexed else "sequence"
@@ -555,19 +566,25 @@ def _infer_source_field(source: str, read: dict) -> tuple[dict, dict]:
         shape = "string"
     else:
         shape = "scalar"
-    repeat_bounds = read.get("repeat_bounds") or (
-        [read["repeat_count"]] if read.get("repeat_count") else []
-    )
-    count = 1 if shape == "scalar" else str(
-        read.get("repeat_expression") or
-        ("N*M" if len(repeat_bounds) >= 2 else "N")
-    )
+
+    if shape == "scalar":
+        count = 1
+    elif shape == "matrix":
+        count = "N"
+    else:
+        count = str(
+            read.get("repeat_expression") or
+            ("N*M" if len(repeat_bounds) >= 2 else "N")
+        )
+
     line_mode = "one_line" if (conv in {"line", "s", "c"} and is_char and not repeated) else "tokens"
+    dimensions = decl.get("dimensions") or ([capacity] if capacity is not None else [])
     declared_type = base_type + (" *" if pointer else "")
-    if capacity is not None:
-        declared_type += f"[{capacity}]"
+    for dimension in dimensions:
+        declared_type += f"[{dimension}]"
     profile = ("text" if shape == "string" or is_char else
                ("nonnegative" if "unsigned" in base_type.lower() else "small_signed"))
+
     input_field = {
         "position": int(read.get("position", 1)), "variable": variable,
         "declared_type": declared_type, "read_function": read.get("read_function", "scanf"),
@@ -577,8 +594,11 @@ def _infer_source_field(source: str, read: dict) -> tuple[dict, dict]:
     plan_field = {
         "variable": variable, "position": int(read.get("position", 1)),
         "shape": shape, "element_type": base_type, "count": count,
-        "line_mode": line_mode, "value_profile": profile,
+        "line_mode": "rows" if shape == "matrix" else line_mode,
+        "value_profile": profile,
     }
+    if shape == "matrix":
+        plan_field["inner_count"] = "N"
     return input_field, plan_field
 
 
@@ -649,9 +669,10 @@ def _normalize_schema_against_source(spec: dict, source: str) -> None:
         pointer, capacity = decl["pointer"], decl["capacity"]
         if "char" not in base_type or not (pointer or capacity is not None):
             continue
+        dimensions = decl.get("dimensions") or ([capacity] if capacity is not None else [])
         declared_type = base_type + (" *" if pointer else "")
-        if capacity is not None:
-            declared_type += f"[{capacity}]"
+        for dimension in dimensions:
+            declared_type += f"[{dimension}]"
         field.update({"variable": variable, "declared_type": declared_type})
         if variable not in plan_map:
             inferred = {"variable": variable, "position": int(field.get("position", len(plan) + 1)),
@@ -924,7 +945,7 @@ Return JSON with exactly this general structure:
     "input": {{"description":"...", "fields":[{{"position":1,"variable":"...","declared_type":"...","read_function":"scanf/fgets/getchar/...","description":"...","constraints":[]}}], "input_relationships":[], "constraints":[]}},
     "output": {{"description":"...", "printf_formats":[], "fields":[]}},
     "profiling_dimension": {{"description":"...", "dimension_name":"...", "parameters":[{{"variable":"...","meaning":"...","scaling_rule":"..."}}], "dimension_value_profile":"identity|prime|odd", "confidence":"high|medium|low", "reasoning":"..."}},
-    "input_generation": {{"fields":[{{"variable":"...","position":1,"shape":"scalar|sequence|matrix|string|string_array|line","element_type":"int|long long|float|double|char|token","count":"1|N|N*N|fixed integer|N+1", "inner_count":"fixed integer|N|omit", "line_mode":"tokens|one_line|one_per_item|rows", "value_profile":"small_signed|nonnegative|positive|sorted|binary|distinct|arbitrary|text", "fixed_value":null}}], "constraints":[], "validity_conditions":[], "serialization":"..."}}
+    "input_generation": {{"fields":[{{"variable":"...","position":1,"shape":"scalar|sequence|matrix|string|string_array|line","element_type":"int|long long|float|double|char|token","count":"1|N|N*N|fixed integer|N+1", "inner_count":"fixed integer|N|omit (only when shape does not require an inner dimension)", "line_mode":"tokens|one_line|one_per_item|rows", "value_profile":"small_signed|nonnegative|positive|sorted|binary|distinct|arbitrary|text", "fixed_value":null}}], "constraints":[], "validity_conditions":[], "serialization":"..."}}
   }},
   "max_safe_dimension": null,
   "analysis_method": "LLM inspection of complete C source"
@@ -969,7 +990,9 @@ Important:
   line_mode, and value_profile. Use an integer for fixed counts, or an expression
   using only N, M, +, -, *, / (for example N, N+1, N*N). For a string, count
   is its character length. For a string_array, count is number of strings and
-  inner_count is each string length.
+  inner_count is each string length; never use omit for string_array.
+- For matrix, inner_count is the column count; never use omit for matrix.
+  Use omit only for shapes that do not require an inner dimension.
 - Use fixed_value only when the program requires a specific literal input value.
   Use value_profile=dimension only for the variable that actually controls N.
 - Describe each stdin read exactly once in input order, including scalar
@@ -1004,6 +1027,39 @@ END PROGRAM'''
     return spec
 
 
+def _effective_inner_count(field: dict, shape: str, n: int) -> int:
+    """Resolve optional inner_count values using shape-aware safe defaults.
+
+    The schema prompt permits the literal "omit" for inner_count when a shape
+    does not need a second dimension. Some model responses nevertheless emit
+    it for matrix/string_array fields. Preserve the intended defaults instead
+    of passing the sentinel to the arithmetic expression evaluator.
+    """
+    raw = field.get("inner_count", None)
+    if isinstance(raw, str) and raw.strip().lower() in {
+        "omit", "omitted", "none", "null", ""
+    }:
+        if shape in {"matrix", "sequence2d", "2d"}:
+            return int(n)       # square matrix default
+        if shape == "string_array":
+            return 8             # default width for each string
+        raise ValueError(
+            f"Input field {field.get('variable', '<unnamed>')!r} has "
+            "inner_count marked omitted, but this shape requires an inner count."
+        )
+    if raw is None:
+        if shape in {"matrix", "sequence2d", "2d"}:
+            raw = "N"
+        elif shape == "string_array":
+            raw = 8
+        else:
+            raise ValueError(
+                f"Input field {field.get('variable', '<unnamed>')!r} "
+                "is missing its required inner_count."
+            )
+    return _safe_count(raw, n)
+
+
 def _safe_count(expression: Any, n: int, inner_n: Optional[int] = None) -> int:
     """Evaluate a deliberately tiny integer expression language for schema lengths."""
     import ast
@@ -1011,8 +1067,10 @@ def _safe_count(expression: Any, n: int, inner_n: Optional[int] = None) -> int:
         value = expression
     elif isinstance(expression, str):
         expr = expression.strip().upper().replace("PRIMARY_N", "N")
-        if not expr:
-            raise ValueError("Empty input-schema count expression.")
+        # Ollama occasionally emits OMIT for an optional count field. For an
+        # array/string length, the safe default is one item per benchmark N.
+        if expr.lower() in {"omit", "omitted", "none", "null", ""}:
+            expr = "N"
         tree = ast.parse(expr, mode="eval")
         allowed = (ast.Expression, ast.BinOp, ast.Add, ast.Sub, ast.Mult,
                    ast.FloorDiv, ast.Div, ast.Constant, ast.Name, ast.Load,
@@ -1118,7 +1176,7 @@ def materialize_stdin(spec: dict, n: int, seed: int = 17) -> str:
         elif shape in {"sequence", "array", "integer_array", "float_array", "string_array"}:
             count = _safe_count(field.get("count", "N"), n)
             if shape == "string_array" or "string_array" in shape:
-                width = _safe_count(field.get("inner_count", 8), n)
+                width = _effective_inner_count(field, shape, n)
                 values = ["".join(_value_for("char", "text", i + j, rng) for j in range(width)) for i in range(count)]
             elif profile == "valid_index":
                 offset = int(field.get("position", 0)) % 2
@@ -1127,7 +1185,7 @@ def materialize_stdin(spec: dict, n: int, seed: int = 17) -> str:
                 values = [_value_for(etype, profile, i, rng, fixed) for i in range(count)]
         elif shape in {"matrix", "sequence2d", "2d"}:
             rows = _safe_count(field.get("count", "N"), n)
-            cols = _safe_count(field.get("inner_count", "N"), n)
+            cols = _effective_inner_count(field, shape, n)
             values = [_value_for(etype, profile, i, rng, fixed) for i in range(rows * cols)]
             if line_mode == "rows":
                 flush_tokens()
@@ -1206,6 +1264,8 @@ def validate_materialized_batch(spec: dict, raw_inputs: dict[int, str]) -> dict:
                     scaling.append(variable)
                 if shape == "string_array":
                     width_expr = field.get("inner_count", 8)
+                    if isinstance(width_expr, str) and width_expr.strip().lower() in {"omit", "omitted", "none", "null", ""}:
+                        width_expr = 8
                     if depends_on_n(width_expr):
                         scaling.append(variable + "[width]")
                     cursor += count
@@ -1213,8 +1273,11 @@ def validate_materialized_batch(spec: dict, raw_inputs: dict[int, str]) -> dict:
                     cursor += count
             elif shape in {"matrix", "sequence2d", "2d"}:
                 rows = count_for(field.get("count", "N"), int(n))
-                cols = count_for(field.get("inner_count", "N"), int(n))
-                if depends_on_n(field.get("count", "N")) or depends_on_n(field.get("inner_count", "N")):
+                cols_expr = field.get("inner_count", "N")
+                if isinstance(cols_expr, str) and cols_expr.strip().lower() in {"omit", "omitted", "none", "null", ""}:
+                    cols_expr = "N"
+                cols = _effective_inner_count(field, shape, int(n))
+                if depends_on_n(field.get("count", "N")) or depends_on_n(cols_expr):
                     scaling.append(variable)
                 cursor += rows * cols
             elif shape in {"string", "line", "char_line"}:
@@ -1302,7 +1365,7 @@ def maximum_safe_dimension(spec: dict, source: Optional[str] = None) -> Optional
             shape = str(field.get("shape", "")).lower()
             count = field.get("count", 1)
             if shape not in {"string", "line", "char_line", "sequence", "array",
-                             "integer_array", "float_array"}:
+                             "integer_array", "float_array", "matrix", "sequence2d", "2d"}:
                 continue
             if isinstance(count, int) or not re.search(r"\bN\b", str(count), re.IGNORECASE):
                 continue
