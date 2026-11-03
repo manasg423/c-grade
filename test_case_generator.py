@@ -159,26 +159,26 @@ def generate_tests_with_llm(
     Completely blackbox and problem-independent.
     """
     system_prompt = (
-        "You are an expert autonomous test case generator for C programming assignments. "
-        "Your task is to analyze ANY reference C implementation (oracle.c), optional problem description, "
-        "and sample input/output, "
-        "and synthesize a rigorous, meaningful, and comprehensive test suite.\n\n"
+        "You are an expert autonomous software testing agent for C programming assignments. "
+        "Your task is to analyze a reference C implementation (oracle.c), an optional problem description, "
+        "and sample I/O to synthesize a rigorous, production-grade test suite.\n\n"
         "Guidelines:\n"
-        "1. Analyze main() and all input-reading calls (scanf, fgets, getchar, cin) alongside the sample input "
-        "to deduce the EXACT standard input format (line breaks, number of tokens per line, types).\n"
-        "2. When provided, use the problem description to understand intended behavior, constraints, and valid cases; "
-        "use the reference implementation and sample input/output to infer the concrete I/O contract. "
-        "Understand the problem logic, preconditions, and invariants from the code and comments "
-        "(e.g. if the code assumes a majority element exists in an array of size n, every standard test case must have an element appearing > n/2 times; "
-        "if it finds a two-sum target, target must be achievable for positive cases; if it sorts an array, provide varied sequences).\n"
-        "3. Synthesize:\n"
-        "   - 'io_tests': typical, diverse, non-trivial test inputs representing valid problem instances across different sizes.\n"
-        "   - 'edge_cases': boundary, corner, and adversarial inputs (empty length inputs,single length inputs, all identical elements, negative numbers, extreme values, or invalid inputs handled by code).\n"
-        "4. Return STRICTLY valid JSON with the schema:\n"
+        "1. I/O Contract Alignment: Analyze main() and all input-reading calls (scanf, fgets, getchar, cin) alongside the sample input. "
+        "If the input expects a size N followed by an array of N elements, your generated strings MUST contain exactly N elements. "
+        "Never generate an array length that contradicts its header.\n"
+        "2. Problem Semantics: Infer preconditions, invariants, and constraints primarily from the oracle code. "
+        "If a 'Problem Description' is provided in the prompt, strictly use it to guide the valid cases and intended behavior"
+        "(e.g., ensuring majority elements exist if requested).\n"
+        "3. Synthesize Two Categories:\n"
+        "   - 'io_tests': Diverse, valid inputs testing the core algorithm. Radically vary the sizes (e.g., N=3, N=15, N=50) and value distributions.\n"
+        "   - 'edge_cases': Adversarial inputs testing boundaries and C-specific limits. Force conditions like: minimum valid sizes (N=0 or N=1), "
+        "all identical elements, negative/zero values, and extreme integer bounds (e.g., 2147483647 or -2147483648).\n"
+        "4. Output Format: Return STRICTLY valid JSON matching this exact schema:\n"
         "{\n"
-        '  "io_tests": ["raw_stdin_string_1", "raw_stdin_string_2", ...],\n'
-        '  "edge_cases": ["raw_stdin_edge_1", "raw_stdin_edge_2", ...]\n'
-        "}"
+        '  "io_tests": ["raw_stdin_string_1", "raw_stdin_string_2"],\n'
+        '  "edge_cases": ["raw_stdin_edge_1", "raw_stdin_edge_2"]\n'
+        "}\n"
+        "CRITICAL: You must properly escape all newlines inside the JSON strings as `\\n` (e.g., \"5\\n1 2 3 4 5\\n\"). Do not output raw line breaks."
     )
 
     sample_sec = f"\nTeacher's Sample Input:\n```\n{sample_input}\n```\n" if sample_input else ""
@@ -198,14 +198,14 @@ def generate_tests_with_llm(
         f"Problem Identifier: {problem_id}\n"
         f"{desc_sec}{sample_sec}{output_sec}\n"
         f"Reference Implementation (oracle.c):\n```c\n{oracle_code}\n```\n\n"
-        f"Generate {needed_io} diverse 'io_tests' and {needed_edge} 'edge_cases'.\n"
-        "CRITICAL RULES:\n"
-        "- Each string MUST be the exact raw text to pipe to stdin, ending with newline '\\n'.\n"
-        "- Use the sample input and sample output as examples of the input/output contract, together with oracle.c.\n"
-        "- When a problem description is provided, use it to guide expected behavior, constraints, and case validity.\n"
-        "- Treat the sample input and output only as references; do not copy or reproduce that exact sample case. Generate new inputs.\n"
-        "- Ensure every io_test is valid, meaningful, and conforms to problem assumptions.\n"
-        "- Produce fresh, distinct inputs with varied sizes and varied values."
+        f"Task: Generate exactly {needed_io} diverse 'io_tests' and {needed_edge} 'edge_cases'.\n\n"
+        "EXECUTION RULES:\n"
+        "- Generate entirely NEW inputs. Do not simply reproduce the sample case.\n"
+        "- Ensure every test case string perfectly matches the input format expected by the oracle's scanf/fgets calls.\n"
+        "- Make the 'io_tests' highly variable in size and data variation.\n"
+        "- Make the 'edge_cases' intentionally tricky to break fragile code (empty cases, max values, off-by-one setups).\n"
+        "- EVERY string must end with a trailing escaped newline (`\\n`).\n"
+        "- Output ONLY the raw JSON object. Do not include markdown formatting blocks (```json) or conversational filler."
     )
 
     res = query_ollama_chat(

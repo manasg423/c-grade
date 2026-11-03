@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Authenticated student and teacher portal for the C-Grade engine."""
+# """Authenticated student and teacher portal for the C-Grade engine."""
 
 #TEACHER_USERNAME=
 #TEACHER_PASSWORD=
