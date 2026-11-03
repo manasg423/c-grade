@@ -12,6 +12,7 @@ def build_rules(
     expected_complexity: str,
     auto_gen_count: int,
     enabled: dict[str, bool],
+    sample_output: str = "",
 ) -> dict:
     analyzer_specs = [
         ("io_tests", "correctness", 0.20, {
@@ -78,5 +79,6 @@ def build_rules(
         "time_limit_s": time_limit,
         "memory_limit_mb": int(memory_limit),
         "smoke_input": sample_input,
+        "sample_output": sample_output,
         "metrics": metrics,
     }

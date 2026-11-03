@@ -372,181 +372,6 @@ def _source_main_bounds(source: str, variable: str) -> Optional[int]:
     valid = [x for x in limits if x >= 2]
     return min(valid) if valid else None
 
-
-
-def _c_statement_end(code: str, pos: int) -> int:
-    """Find the end of a simple C statement, including nested control statements."""
-    while pos < len(code) and code[pos].isspace():
-        pos += 1
-    if pos >= len(code):
-        return pos
-    if code[pos] == "{":
-        depth, i = 0, pos
-        while i < len(code):
-            if code[i] == "{":
-                depth += 1
-            elif code[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    return i + 1
-            i += 1
-        return len(code)
-    keyword = re.match(r"(for|while|if|switch)\b", code[pos:])
-    if keyword:
-        op = code.find("(", pos + len(keyword.group(1)))
-        cp = _matching_paren_in_text(code, op) if op >= 0 else None
-        if cp is None:
-            semi = code.find(";", pos)
-            return semi + 1 if semi >= 0 else len(code)
-        end = _c_statement_end(code, cp + 1)
-        if keyword.group(1) == "if":
-            cursor = end
-            while cursor < len(code) and code[cursor].isspace():
-                cursor += 1
-            if re.match(r"else\b", code[cursor:]):
-                end = _c_statement_end(code, cursor + 4)
-        return end
-    depth = 0
-    for i in range(pos, len(code)):
-        if code[i] in "([":
-            depth += 1
-        elif code[i] in ")]":
-            depth = max(0, depth - 1)
-        elif code[i] == ";" and depth == 0:
-            return i + 1
-    return len(code)
-
-
-def _enclosing_for_bound(code: str, position: int) -> Optional[str]:
-    """Return the scalar bound of a for-loop containing a stdin read, if any."""
-    for match in re.finditer(r"\bfor\s*\(", code):
-        op = code.find("(", match.start())
-        cp = _matching_paren_in_text(code, op)
-        if cp is None:
-            continue
-        body_start = cp + 1
-        while body_start < len(code) and code[body_start].isspace():
-            body_start += 1
-        if body_start >= len(code):
-            continue
-        body_end = _c_statement_end(code, body_start)
-        if not (body_start <= position < body_end):
-            continue
-        parts = code[op + 1:cp].split(";")
-        if len(parts) != 3:
-            continue
-        bound = re.search(r"(?:<=|<)\s*([A-Za-z_]\w*)\b", parts[1])
-        if bound:
-            return bound.group(1)
-    return None
-
-
-
-def _enclosing_for_bounds(code: str, position: int) -> list[str]:
-    """Return all input-variable names used by enclosing for-loop bounds."""
-    found = []
-    for match in re.finditer(r"\bfor\s*\(", code):
-        op = code.find("(", match.start())
-        cp = _matching_paren_in_text(code, op)
-        if cp is None:
-            continue
-        body_start = cp + 1
-        while body_start < len(code) and code[body_start].isspace():
-            body_start += 1
-        if body_start >= len(code):
-            continue
-        body_end = _c_statement_end(code, body_start)
-        if not (body_start <= position < body_end):
-            continue
-        parts = code[op + 1:cp].split(";")
-        if len(parts) != 3:
-            continue
-        rhs = re.search(r"(?:<=|<)\s*(.+)$", parts[1].strip())
-        if not rhs:
-            continue
-        names = re.findall(r"\b[A-Za-z_]\w*\b", rhs.group(1))
-        for name in names:
-            if name not in {"int", "long", "short", "unsigned", "size_t"}:
-                found.append((match.start(), name))
-    return list(dict.fromkeys(name for _, name in sorted(found)))
-
-
-def _enclosing_repeat_count(code: str, position: int) -> str:
-    """Translate enclosing loop bounds to the materializer's N/M expression."""
-    loops = []
-    for match in re.finditer(r"\bfor\s*\(", code):
-        op = code.find("(", match.start())
-        cp = _matching_paren_in_text(code, op)
-        if cp is None:
-            continue
-        body_start = cp + 1
-        while body_start < len(code) and code[body_start].isspace():
-            body_start += 1
-        if body_start >= len(code) or not (_c_statement_end(code, body_start) > position >= body_start):
-            continue
-        parts = code[op + 1:cp].split(";")
-        if len(parts) == 3:
-            rhs = re.search(r"(?:<=|<)\s*(.+)$", parts[1].strip())
-            if rhs:
-                loops.append(rhs.group(1).strip())
-    if len(loops) >= 2:
-        return "N*M"
-    if not loops:
-        return "N"
-    expr = loops[0]
-    names = re.findall(r"\b[A-Za-z_]\w*\b", expr)
-    names = [name for name in names if name not in {"int", "long", "short", "unsigned", "size_t"}]
-    if "*" in expr:
-        if len(set(names)) >= 2:
-            return "N*M"
-        if len(names) == 1:
-            return "N*N"
-        number = re.search(r"\b(\d+)\s*\*", expr)
-        return f"{number.group(1)}*N" if number else "N*N"
-    return "N"
-
-
-def _source_main_bounds(source: str, variable: str) -> Optional[int]:
-    """Infer an upper input bound from simple early-exit range guards."""
-    code = _c_code_without_comments(source)
-    limits = []
-    for match in re.finditer(r"\bif\s*\(", code):
-        op = code.find("(", match.start())
-        cp = _matching_paren_in_text(code, op)
-        if cp is None:
-            continue
-        then_start = cp + 1
-        while then_start < len(code) and code[then_start].isspace():
-            then_start += 1
-        if then_start >= len(code):
-            continue
-        if code[then_start] == "{":
-            depth, end = 0, then_start
-            while end < len(code):
-                if code[end] == "{":
-                    depth += 1
-                elif code[end] == "}":
-                    depth -= 1
-                    if depth == 0:
-                        end += 1
-                        break
-                end += 1
-        else:
-            semi = code.find(";", then_start)
-            end = semi + 1 if semi >= 0 else len(code)
-        body = code[then_start:end].lstrip()
-        if not re.match(r"(?:\{\s*)?(?:return\b|exit\s*\(|_Exit\s*\(|abort\s*\()", body):
-            continue
-        predicate = code[op + 1:cp]
-        for m in re.finditer(
-            r"\b" + re.escape(variable) + r"\s*(>|>=)\s*(\d+)\b",
-            predicate
-        ):
-            operator, raw = m.group(1), int(m.group(2))
-            limits.append(raw if operator == ">" else raw - 1)
-    valid = [x for x in limits if x >= 2]
-    return min(valid) if valid else None
-
 def _source_stdin_reads(source: str) -> list[dict]:
     """Extract common direct-stdin destinations, including character-at-a-time reads.
 
@@ -600,9 +425,6 @@ def _source_stdin_reads(source: str) -> list[dict]:
             if root:
                 reads.append({"variable": root, "expression": expr,
                               "read_function": name, "conversion": conversion,
-                              "repeat_count": _enclosing_for_bound(code, match.start()),
-                              "repeat_bounds": _enclosing_for_bounds(code, match.start()),
-                              "repeat_expression": _enclosing_repeat_count(code, match.start()),
                               "repeat_count": _enclosing_for_bound(code, match.start()),
                               "repeat_bounds": _enclosing_for_bounds(code, match.start()),
                               "repeat_expression": _enclosing_repeat_count(code, match.start()),
@@ -673,7 +495,6 @@ def _find_c_declaration(source: str, variable: str,
         r"(unsigned\s+long\s+long|long\s+long|unsigned\s+long|"
         r"unsigned\s+int|unsigned\s+short|signed\s+char|unsigned\s+char|"
         r"size_t|long|short|int|char|float|double)\s*([^;{}]+);"
-        r"size_t|long|short|int|char|float|double)\s*([^;{}]+);"
     )
     matches = list(type_pattern.finditer(code[:limit]))
     # Nearest declaration wins, avoiding earlier function parameters/local names.
@@ -726,10 +547,6 @@ def _infer_source_field(source: str, read: dict) -> tuple[dict, dict]:
         r"\b" + re.escape(variable) + r"\s*[+\-]", expr
     ))
     repeated = bool(read.get("repeat_count"))
-    pointer_arithmetic = bool(pointer and re.search(
-        r"\b" + re.escape(variable) + r"\s*[+\-]", expr
-    ))
-    repeated = bool(read.get("repeat_count"))
     is_char = "char" in base_type
     index_count = len(re.findall(r"\[[^\]]+\]", expr))
     repeat_bounds = read.get("repeat_bounds") or (
@@ -743,8 +560,6 @@ def _infer_source_field(source: str, read: dict) -> tuple[dict, dict]:
         shape = "string" if (not indexed or capacity is not None or pointer) else "sequence"
     elif conv == "s" or conv == "line":
         shape = "string" if not indexed else "sequence"
-    elif indexed or pointer_arithmetic or repeated:
-        shape = "string" if is_char and (not repeated or conv in {"s", "line"}) else "sequence"
     elif indexed or pointer_arithmetic or repeated:
         shape = "string" if is_char and (not repeated or conv in {"s", "line"}) else "sequence"
     elif is_char and (capacity is not None or pointer):
@@ -900,63 +715,7 @@ def _normalize_schema_against_source(spec: dict, source: str) -> None:
         plan = [item for item in plan
                 if _root_variable(str(item.get("variable", ""))) in actual]
 
-    # If every recognized stdin read is in main, treat those destinations as
-    # authoritative and discard LLM-invented locals (graph arrays, loop indices,
-    # printf, etc.). If reads occur in helper functions, preserve model-only
-    # fields because wrapper readers may return values into caller variables.
-    main_match = re.search(r"\bmain\s*\([^)]*\)\s*\{", code)
-    main_start = main_match.end() if main_match else -1
-    main_open = code.find("{", main_match.start()) if main_match else -1
-    main_close = None
-    if main_open >= 0:
-        depth = 0
-        for idx in range(main_open, len(code)):
-            if code[idx] == "{":
-                depth += 1
-            elif code[idx] == "}":
-                depth -= 1
-                if depth == 0:
-                    main_close = idx
-                    break
-    reads_in_main = bool(reads) and main_close is not None and all(
-        main_start <= item.get("source_offset", -1) < main_close for item in reads
-    )
-    if reads_in_main:
-        fields = [item for item in fields
-                  if _root_variable(str(item.get("variable", ""))) in actual]
-        plan = [item for item in plan
-                if _root_variable(str(item.get("variable", ""))) in actual]
-
     order = {item["variable"]: item["position"] for item in reads}
-    allowed_profiles = {"small_signed", "nonnegative", "positive", "sorted",
-                        "binary", "distinct", "arbitrary", "text", "dimension",
-                        "prime", "odd", "pair_sum_no_match", "valid_index"}
-    for item in plan:
-        candidates = [part.strip().lower() for part in
-                      re.split(r"[|,/;]+", str(item.get("value_profile", "small_signed")))]
-        valid = [part for part in candidates if part in allowed_profiles]
-        if valid:
-            if "nonnegative" in valid:
-                item["value_profile"] = "nonnegative"
-            elif "positive" in valid:
-                item["value_profile"] = "positive"
-            else:
-                item["value_profile"] = valid[0]
-
-    for item in plan:
-        variable = str(item.get("variable", ""))
-        if not variable or str(item.get("shape", "scalar")).lower() not in {
-            "scalar", "number", "integer", "float"
-        }:
-            continue
-        declaration = declaration_for(variable)
-        if declaration and "unsigned" in str(declaration.get("base_type", "")).lower():
-            item["value_profile"] = "nonnegative"
-        elif re.search(r"\b" + re.escape(variable) + r"\s*<\s*0\b", code):
-            item["value_profile"] = "nonnegative"
-        elif re.search(r"\b" + re.escape(variable) + r"\s*<=\s*0\b", code):
-            item["value_profile"] = "positive"
-
     allowed_profiles = {"small_signed", "nonnegative", "positive", "sorted",
                         "binary", "distinct", "arbitrary", "text", "dimension",
                         "prime", "odd", "pair_sum_no_match", "valid_index"}
@@ -1039,56 +798,11 @@ def _normalize_schema_against_source(spec: dict, source: str) -> None:
                               re.escape(primary) + r"\b", code)):
             item["value_profile"] = "valid_index"
 
-    # Correct an LLM-selected local loop counter when it is not an actual
-    # stdin destination. Prefer the first source-verified scalar input.
-    dimension = analysis.get("profiling_dimension", {})
-    parameters = dimension.get("parameters", []) if isinstance(dimension, dict) else []
-    primary = _primary_dimension_variable(dimension)
-    if parameters:
-        first = parameters[0] if isinstance(parameters[0], dict) else {}
-        if str(first.get("variable", "")) not in actual:
-            scalar_candidates = [
-                item for item in reads
-                if "[" not in str(item.get("expression", ""))
-                and not item.get("repeat_count")
-            ]
-            if scalar_candidates:
-                replacement = scalar_candidates[0]["variable"]
-                parameters[0]["variable"] = replacement
-                dimension["dimension_name"] = replacement
-                dimension["dimension_value_profile"] = "identity"
-                dimension["reasoning"] = (
-                    "The previous dimension was not read from stdin; "
-                    f"using source-verified scalar input {replacement!r}."
-                )
-    primary = _primary_dimension_variable(dimension)
-
-    repeated_bounds = {
-        bound
-        for item in reads
-        for bound in (item.get("repeat_bounds") or
-                      ([item["repeat_count"]] if item.get("repeat_count") else []))
-    }
-    for item in plan:
-        if str(item.get("variable", "")) in repeated_bounds:
-            item["value_profile"] = "dimension"
-
-    # Graph/adjacency inputs commonly require every endpoint to be in [0, n).
-    # Generate valid deterministic indices instead of arbitrary nonnegative
-    # values that would be rejected by the student's range checks.
-    for item in plan:
-        variable = str(item.get("variable", ""))
-        if (variable and re.search(r"\b" + re.escape(variable) + r"\s*<\s*0\b", code)
-                and re.search(r"\b" + re.escape(variable) + r"\s*>=\s*" +
-                              re.escape(primary) + r"\b", code)):
-            item["value_profile"] = "valid_index"
-
     # Preserve the requested N for ordinary size parameters and allocation
     # dimensions. Prime mapping is reserved for source that resembles a
     # primality test; otherwise nearby requests can collapse to the same value.
     dimension = analysis.get("profiling_dimension", {})
     parameters = dimension.get("parameters", []) if isinstance(dimension, dict) else []
-    primary = _primary_dimension_variable(dimension)
     primary = _primary_dimension_variable(dimension)
     code = _c_code_without_comments(source)
     if primary:
@@ -1097,11 +811,6 @@ def _normalize_schema_against_source(spec: dict, source: str) -> None:
         primality_pattern = bool(
             re.search(r"%\s*[A-Za-z_]\w*", code) and
             re.search(r"(?:sqrt\s*\(\s*" + re.escape(primary) + r"\s*\)|"
-                      r"[A-Za-z_]\w*\s*\*\s*[A-Za-z_]\w*\s*<=\s*" + re.escape(primary) + r"|"
-                      r"[A-Za-z_]\w*\s*<=\s*" + re.escape(primary) + r"\s*/\s*[A-Za-z_]\w*)", code))
-        if primality_pattern and not allocates_by_dimension:
-            dimension["dimension_value_profile"] = "prime"
-        else:
                       r"[A-Za-z_]\w*\s*\*\s*[A-Za-z_]\w*\s*<=\s*" + re.escape(primary) + r"|"
                       r"[A-Za-z_]\w*\s*<=\s*" + re.escape(primary) + r"\s*/\s*[A-Za-z_]\w*)", code))
         if primality_pattern and not allocates_by_dimension:
@@ -1140,25 +849,6 @@ def _schema_roots(fields: list[dict]) -> set[str]:
         if root:
             roots.add(root)
     return roots
-
-
-def _primary_dimension_variable(dimension: dict) -> str:
-    """Resolve the scalar stdin variable represented by the requested N."""
-    if not isinstance(dimension, dict):
-        return ""
-    parameters = dimension.get("parameters", [])
-    names = [str(p.get("variable", "")) for p in parameters if isinstance(p, dict)]
-    dimension_name = str(dimension.get("dimension_name", "")).strip()
-    if dimension_name in names:
-        return dimension_name
-    for parameter in parameters:
-        if isinstance(parameter, dict):
-            rule = str(parameter.get("scaling_rule", "")).lower()
-            if any(term in rule for term in ("primary", "controls n", "determines n")):
-                name = str(parameter.get("variable", ""))
-                if name:
-                    return name
-    return names[0] if names else ""
 
 
 def _primary_dimension_variable(dimension: dict) -> str:
@@ -1448,8 +1138,6 @@ def materialize_stdin(spec: dict, n: int, seed: int = 17) -> str:
     rng = random.Random((int(seed) << 32) ^ int(n))
     # Non-dimension scalar parameters must not drift between benchmark sizes.
     scalar_rng = random.Random(int(seed))
-    # Non-dimension scalar parameters must not drift between benchmark sizes.
-    scalar_rng = random.Random(int(seed))
     output_lines: list[str] = []
     tokens: list[str] = []
 
@@ -1468,8 +1156,6 @@ def materialize_stdin(spec: dict, n: int, seed: int = 17) -> str:
             dimension_parameters = spec.get("analysis", {}).get("profiling_dimension", {}).get("parameters", [])
             dimension_info = spec.get("analysis", {}).get("profiling_dimension", {})
             primary_dimension_variable = _primary_dimension_variable(dimension_info)
-            dimension_info = spec.get("analysis", {}).get("profiling_dimension", {})
-            primary_dimension_variable = _primary_dimension_variable(dimension_info)
             if str(field.get("variable", "")) == primary_dimension_variable or profile == "dimension":
                 dimension_profile = str(spec.get("analysis", {}).get("profiling_dimension", {}).get(
                     "dimension_value_profile", "identity")).lower()
@@ -1486,19 +1172,12 @@ def materialize_stdin(spec: dict, n: int, seed: int = 17) -> str:
                     etype, profile, int(field.get("position", 0)),
                     scalar_rng, fixed
                 )
-                scalar = _value_for(
-                    etype, profile, int(field.get("position", 0)),
-                    scalar_rng, fixed
-                )
             values = [scalar]
         elif shape in {"sequence", "array", "integer_array", "float_array", "string_array"}:
             count = _safe_count(field.get("count", "N"), n)
             if shape == "string_array" or "string_array" in shape:
                 width = _effective_inner_count(field, shape, n)
                 values = ["".join(_value_for("char", "text", i + j, rng) for j in range(width)) for i in range(count)]
-            elif profile == "valid_index":
-                offset = int(field.get("position", 0)) % 2
-                values = [str((i + offset) % max(1, int(n))) for i in range(count)]
             elif profile == "valid_index":
                 offset = int(field.get("position", 0)) % 2
                 values = [str((i + offset) % max(1, int(n))) for i in range(count)]
@@ -1551,7 +1230,6 @@ def validate_materialized_batch(spec: dict, raw_inputs: dict[int, str]) -> dict:
     fields = analysis.get("input_generation", {}).get("fields", [])
     dimension = analysis.get("profiling_dimension", {})
     parameters = dimension.get("parameters", []) if isinstance(dimension, dict) else []
-    primary = _primary_dimension_variable(dimension)
     primary = _primary_dimension_variable(dimension)
 
     def depends_on_n(expression):
@@ -1666,13 +1344,7 @@ def generate_stdin(spec: dict, n: int, seed: int = 17,
 def maximum_safe_dimension(spec: dict, source: Optional[str] = None) -> Optional[int]:
     """Return the tightest declared or source-visible scalar input upper bound."""
     candidates = []
-def maximum_safe_dimension(spec: dict, source: Optional[str] = None) -> Optional[int]:
-    """Return the tightest declared or source-visible scalar input upper bound."""
-    candidates = []
     try:
-        value = int(spec.get("max_safe_dimension"))
-        if value > 0:
-            candidates.append(value)
         value = int(spec.get("max_safe_dimension"))
         if value > 0:
             candidates.append(value)
@@ -1849,103 +1521,6 @@ def _static_source_spec(source_path: str, source: str, fallback_reason: str,
     spec["max_safe_dimension"] = maximum_safe_dimension(spec, source)
     return spec
 
-    input_fields, plan = [], []
-    try:
-        for read in reads:
-            field, generation = _infer_source_field(source, read)
-            input_fields.append(field)
-            plan.append(generation)
-    except (ValueError, TypeError, KeyError):
-        return None
-
-    actual = {item["variable"] for item in reads}
-    repeated_bounds = {
-        name for item in reads for name in (
-            item.get("repeat_bounds") or
-            ([item["repeat_count"]] if item.get("repeat_count") else [])
-        )
-    }
-    for item in plan:
-        if item["variable"] in repeated_bounds:
-            item["value_profile"] = "dimension"
-
-    # Choose a scalar that visibly controls allocation/loop work. If there is
-    # no scalar (e.g. strings), the first variable-length input is the dimension.
-    scalar_names = [
-        item["variable"] for item in plan
-        if item.get("shape") == "scalar" and item["variable"] in actual
-    ]
-    def control_score(name: str) -> int:
-        score = len(re.findall(r"\b" + re.escape(name) + r"\b", code))
-        score += 4 * len(re.findall(
-            r"\b(?:malloc|calloc|realloc)\s*\([^;]*\b" + re.escape(name) + r"\b",
-            code
-        ))
-        return score
-    primary = max(scalar_names, key=control_score) if scalar_names else plan[0]["variable"]
-
-    parameters = []
-    for item in plan:
-        if item.get("shape") == "scalar":
-            name = item["variable"]
-            if name == primary or name in repeated_bounds:
-                rule = "Primary scaling factor" if name == primary else "Scales with N in repeated input loop"
-            else:
-                rule = "Independent scalar parameter"
-            parameters.append({"variable": name, "meaning": "Source-inferred scalar input.",
-                               "scaling_rule": rule})
-    if not parameters:
-        parameters = [{"variable": primary, "meaning": "Source-inferred variable-length input.",
-                        "scaling_rule": "Primary scaling factor"}]
-
-    spec = {
-        "schema_version": SPEC_SCHEMA_VERSION,
-        "source_file": os.path.basename(source_path),
-        "student_source_sha256": sha256_file(source_path),
-        "analysis_method": "Conservative static source fallback (direct stdin reads in main)",
-        "fallback_warning": (
-            "Ollama input analysis failed; this schema was inferred from direct standard-input "
-            "reads and simple C declarations. Complex helper readers or semantic constraints "
-            "may require a manually supplied input specification. Original error: "
-            + str(fallback_reason)[:1000]
-        ),
-        "analysis": {
-            "input": {
-                "description": "Direct standard-input destinations inferred from C source.",
-                "fields": input_fields,
-                "input_relationships": [],
-                "constraints": [],
-            },
-            "output": {"description": "Output inferred from program source.", "printf_formats": [], "fields": []},
-            "profiling_dimension": {
-                "description": f"Source-inferred primary input dimension {primary}.",
-                "dimension_name": primary,
-                "parameters": parameters,
-                "dimension_value_profile": "identity",
-                "confidence": "medium",
-                "reasoning": "Static fallback selected a scalar input that controls loops/allocations, or the first variable-length input.",
-            },
-            "input_generation": {
-                "fields": plan,
-                "constraints": [],
-                "validity_conditions": [],
-                "serialization": "C stdin token/line order inferred from direct reads.",
-            },
-        },
-        "max_safe_dimension": None,
-        "generation_context": {
-            "source": oracle_source or source,
-            "sample_input": sample_input or "",
-            "problem_description": problem_description or "",
-            "model": model,
-            "base_url": base_url,
-        },
-    }
-    _normalize_schema_against_source(spec, source)
-    _validate(spec, source)
-    spec["max_safe_dimension"] = maximum_safe_dimension(spec, source)
-    return spec
-
 
 def load_or_analyze(source_path: str, spec_dir: Optional[str] = None,
                     model: str = DEFAULT_MODEL, base_url: str = DEFAULT_URL,
@@ -1982,22 +1557,6 @@ def load_or_analyze(source_path: str, spec_dir: Optional[str] = None,
             # A stale or malformed cache is regenerated below.
             pass
 
-    try:
-        spec = analyze_source(
-            str(src), model=model, base_url=base_url, timeout=timeout,
-            sample_input=sample_input,
-            problem_description=problem_description,
-            oracle_source=oracle_source,
-        )
-    except Exception as exc:
-        spec = _static_source_spec(
-            str(src), src.read_text(encoding="utf-8", errors="replace"),
-            fallback_reason=str(exc), sample_input=sample_input,
-            problem_description=problem_description, oracle_source=oracle_source,
-            model=model, base_url=base_url,
-        )
-        if spec is None:
-            raise
     try:
         spec = analyze_source(
             str(src), model=model, base_url=base_url, timeout=timeout,

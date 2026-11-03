@@ -151,33 +151,38 @@ def generate_tests_with_llm(
     problem_description: Optional[str] = None,
     num_io: int = 5,
     num_edge: int = 5,
-    model: str = DEFAULT_MODEL
+    model: str = DEFAULT_MODEL,
+    sample_output: Optional[str] = None,
 ) -> dict:
     """
     Autonomous LLM test case generator.
     Completely blackbox and problem-independent.
     """
     system_prompt = (
-        "You are an expert autonomous test case generator for C programming assignments. "
-        "Your task is to analyze ANY reference C implementation (oracle.c) and sample input, "
-        "and synthesize a rigorous, meaningful, and comprehensive test suite.\n\n"
+        "You are an expert autonomous software testing agent for C programming assignments. "
+        "Your task is to analyze a reference C implementation (oracle.c), an optional problem description, "
+        "and sample I/O to synthesize a rigorous, production-grade test suite.\n\n"
         "Guidelines:\n"
-        "1. Analyze main() and all input-reading calls (scanf, fgets, getchar, cin) alongside the sample input "
-        "to deduce the EXACT standard input format (line breaks, number of tokens per line, types).\n"
-        "2. Understand the problem logic, preconditions, and invariants from the code and comments "
-        "(e.g. if the code assumes a majority element exists in an array of size n, every standard test case must have an element appearing > n/2 times; "
-        "if it finds a two-sum target, target must be achievable for positive cases; if it sorts an array, provide varied sequences).\n"
-        "3. Synthesize:\n"
-        "   - 'io_tests': typical, diverse, non-trivial test inputs representing valid problem instances across different sizes.\n"
-        "   - 'edge_cases': boundary, corner, and adversarial inputs (empty length inputs,single length inputs, all identical elements, negative numbers, extreme values, or invalid inputs handled by code).\n"
-        "4. Return STRICTLY valid JSON with the schema:\n"
+        "1. I/O Contract Alignment: Analyze main() and all input-reading calls (scanf, fgets, getchar, cin) alongside the sample input. "
+        "If the input expects a size N followed by an array of N elements, your generated strings MUST contain exactly N elements. "
+        "Never generate an array length that contradicts its header.\n"
+        "2. Problem Semantics: Infer preconditions, invariants, and constraints primarily from the oracle code. "
+        "If a 'Problem Description' is provided in the prompt, strictly use it to guide the valid cases and intended behavior"
+        "(e.g., ensuring majority elements exist if requested).\n"
+        "3. Synthesize Two Categories:\n"
+        "   - 'io_tests': Diverse, valid inputs testing the core algorithm. Radically vary the sizes (e.g., N=3, N=15, N=50) and value distributions.\n"
+        "   - 'edge_cases': Adversarial inputs testing boundaries and C-specific limits. Force conditions like: minimum valid sizes (N=0 or N=1), "
+        "all identical elements, negative/zero values, and extreme integer bounds (e.g., 2147483647 or -2147483648).\n"
+        "4. Output Format: Return STRICTLY valid JSON matching this exact schema:\n"
         "{\n"
-        '  "io_tests": ["raw_stdin_string_1", "raw_stdin_string_2", ...],\n'
-        '  "edge_cases": ["raw_stdin_edge_1", "raw_stdin_edge_2", ...]\n'
-        "}"
+        '  "io_tests": ["raw_stdin_string_1", "raw_stdin_string_2"],\n'
+        '  "edge_cases": ["raw_stdin_edge_1", "raw_stdin_edge_2"]\n'
+        "}\n"
+        "CRITICAL: You must properly escape all newlines inside the JSON strings as `\\n` (e.g., \"5\\n1 2 3 4 5\\n\"). Do not output raw line breaks."
     )
 
     sample_sec = f"\nTeacher's Sample Input:\n```\n{sample_input}\n```\n" if sample_input else ""
+    output_sec = f"\nTeacher's Sample Output:\n```\n{sample_output}\n```\n" if sample_output else ""
     desc_sec = f"\nProblem Description:\n{problem_description}\n" if problem_description else ""
 
     io_results: list[str] = []
@@ -191,14 +196,16 @@ def generate_tests_with_llm(
 
     user_prompt = (
         f"Problem Identifier: {problem_id}\n"
-        f"{desc_sec}{sample_sec}\n"
+        f"{desc_sec}{sample_sec}{output_sec}\n"
         f"Reference Implementation (oracle.c):\n```c\n{oracle_code}\n```\n\n"
-        f"Generate {needed_io} diverse 'io_tests' and {needed_edge} 'edge_cases'.\n"
-        "CRITICAL RULES:\n"
-        "- Each string MUST be the exact raw text to pipe to stdin, ending with newline '\\n'.\n"
-        "- Follow the exact input format demonstrated in the sample input and oracle.c.\n"
-        "- Ensure every io_test is valid, meaningful, and conforms to problem assumptions.\n"
-        "- Produce fresh, distinct inputs with varied sizes and varied values."
+        f"Task: Generate exactly {needed_io} diverse 'io_tests' and {needed_edge} 'edge_cases'.\n\n"
+        "EXECUTION RULES:\n"
+        "- Generate entirely NEW inputs. Do not simply reproduce the sample case.\n"
+        "- Ensure every test case string perfectly matches the input format expected by the oracle's scanf/fgets calls.\n"
+        "- Make the 'io_tests' highly variable in size and data variation.\n"
+        "- Make the 'edge_cases' intentionally tricky to break fragile code (empty cases, max values, off-by-one setups).\n"
+        "- EVERY string must end with a trailing escaped newline (`\\n`).\n"
+        "- Output ONLY the raw JSON object. Do not include markdown formatting blocks (```json) or conversational filler."
     )
 
     res = query_ollama_chat(
@@ -349,7 +356,8 @@ def generate_all_test_cases(
     problem_description: Optional[str] = None,
     num_io: int = 5,
     num_edge: int = 5,
-    force_regenerate: bool = True
+    force_regenerate: bool = True,
+    sample_output: Optional[str] = None,
 ) -> dict:
     """
     Universal test case generator.
@@ -374,14 +382,17 @@ def generate_all_test_cases(
         with open(oracle_path, "r", encoding="utf-8", errors="ignore") as f:
             oracle_code = f.read()
 
-    # If sample_input not passed, attempt reading from rules JSON in problems/<problem>/
-    if not sample_input:
+    # Fill missing sample values from the assignment rules.
+    if not sample_input or sample_output is None:
         rules_file = os.path.join("problems", problem_id, f"{problem_id}_rules.json")
         if os.path.isfile(rules_file):
             try:
                 with open(rules_file, "r", encoding="utf-8") as rf:
                     r_data = json.load(rf)
-                    sample_input = r_data.get("smoke_input", "")
+                    if not sample_input:
+                        sample_input = r_data.get("smoke_input", "")
+                    if sample_output is None:
+                        sample_output = r_data.get("sample_output", "")
             except Exception:
                 pass
 
@@ -399,6 +410,7 @@ def generate_all_test_cases(
             problem_id=problem_id,
             oracle_code=oracle_code,
             sample_input=sample_input,
+            sample_output=sample_output,
             problem_description=problem_description,
             num_io=num_io,
             num_edge=num_edge,
@@ -516,6 +528,7 @@ if __name__ == "__main__":
     parser.add_argument("--oracle", "-o", default=None, help="Path to reference oracle.c")
     parser.add_argument("--tests-dir", "-t", default=None, help="Destination tests directory")
     parser.add_argument("--sample", "-s", default=None, help="Sample smoke input string")
+    parser.add_argument("--sample-output", default=None, help="Teacher sample output string")
     parser.add_argument("--desc", "-d", default=None, help="Optional problem description / requirements")
     parser.add_argument("--num-io", type=int, default=5, help="Number of standard I/O test cases to generate")
     parser.add_argument("--num-edge", type=int, default=5, help="Number of adversarial edge cases to generate")
@@ -528,6 +541,7 @@ if __name__ == "__main__":
         tests_dir=args.tests_dir,
         oracle_path=args.oracle,
         sample_input=args.sample,
+        sample_output=args.sample_output,
         problem_description=args.desc,
         num_io=args.num_io,
         num_edge=args.num_edge,
