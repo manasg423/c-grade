@@ -45,6 +45,7 @@ from typing import Any, Optional
 
 OLLAMA_CHAT_URL = "http://127.0.0.1:11434/api/chat"
 DEFAULT_MODEL = "qwen3.5:2b"
+_IO_FORMAT_CACHE: dict[tuple[str, str], str] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +145,49 @@ def query_ollama_chat(
 # Completely LLM-Generated Test Suite Synthesis
 # ---------------------------------------------------------------------------
 
+def analyze_io_format_with_llm(oracle_code: str, model: str = DEFAULT_MODEL) -> str:
+    """Infer the standard input/output contract using only the oracle source."""
+    if not oracle_code.strip():
+        return ""
+    cache_key = (model, oracle_code)
+    if cache_key in _IO_FORMAT_CACHE:
+        return _IO_FORMAT_CACHE[cache_key]
+
+    response = query_ollama_chat(
+        [
+            {
+                "role": "system",
+                "content": (
+                    "Analyze the supplied C source alone and infer the complete stdin grammar. Trace every "
+                    "input read in execution order, including scanf format strings, fgets/getline, getchar, "
+                    "character and string reads, loops, branches, repeated records, test-case counts, EOF, "
+                    "and sentinels. Distinguish token-based whitespace from significant line boundaries, "
+                    "and state exact field types, counts, delimiters, conditional sections, and constraints "
+                    "enforced by the code. Describe any ambiguities instead of guessing. Return JSON with "
+                    "exactly one key, io_format, whose value is a concise but detailed string."
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"Analyze only this oracle.c source:\n```c\n{oracle_code}\n```",
+            },
+        ],
+        model=model,
+        temperature=0.1,
+        num_predict=250,
+        timeout=100.0,
+    )
+    if not isinstance(response, dict):
+        return ""
+    io_format = response.get("io_format")
+    if not isinstance(io_format, str) or not io_format.strip():
+        return ""
+    if len(_IO_FORMAT_CACHE) >= 16:
+        _IO_FORMAT_CACHE.pop(next(iter(_IO_FORMAT_CACHE)))
+    _IO_FORMAT_CACHE[cache_key] = io_format.strip()
+    return _IO_FORMAT_CACHE[cache_key]
+
+
 def generate_tests_with_llm(
     problem_id: str,
     oracle_code: str,
@@ -154,39 +198,37 @@ def generate_tests_with_llm(
     model: str = DEFAULT_MODEL,
     sample_output: Optional[str] = None,
 ) -> dict:
-    """
-    Autonomous LLM test case generator.
-    Completely blackbox and problem-independent.
-    """
+    """Generate C test inputs using oracle-derived format analysis."""
+    io_format = analyze_io_format_with_llm(oracle_code, model=model)
+
     system_prompt = (
-        "You are an expert autonomous software testing agent for C programming assignments. "
-        "Your task is to analyze a reference C implementation (oracle.c), an optional problem description, "
-        "and sample I/O to synthesize a rigorous, production-grade test suite.\n\n"
-        "Guidelines:\n"
-        "1. I/O Contract Alignment: Analyze main() and all input-reading calls (scanf, fgets, getchar, cin) alongside the sample input. "
-        "If the input expects a size N followed by an array of N elements, your generated strings MUST contain exactly N elements. "
-        "Never generate an array length that contradicts its header.\n"
-        "2. Problem Semantics: Infer preconditions, invariants, and constraints primarily from the oracle code. "
-        "If a 'Problem Description' is provided in the prompt, strictly use it to guide the valid cases and intended behavior"
-        "(e.g., ensuring majority elements exist if requested).\n"
-        "3. Synthesize Two Categories:\n"
-        "   - 'io_tests': Diverse, valid inputs testing the core algorithm. Radically vary the sizes (e.g., N=3, N=15, N=50) and value distributions.\n"
-        "   - 'edge_cases': Adversarial inputs testing boundaries and C-specific limits. Force conditions like: minimum valid sizes (N=0 or N=1), "
-        "all identical elements, negative/zero values, and extreme integer bounds (e.g., 2147483647 or -2147483648).\n"
-        "4. Output Format: Return STRICTLY valid JSON matching this exact schema:\n"
-        "{\n"
-        '  "io_tests": ["raw_stdin_string_1", "raw_stdin_string_2"],\n'
-        '  "edge_cases": ["raw_stdin_edge_1", "raw_stdin_edge_2"]\n'
-        "}\n"
-        "CRITICAL: You must properly escape all newlines inside the JSON strings as `\\n` (e.g., \"5\\n1 2 3 4 5\\n\"). Do not output raw line breaks."
+        "You are an expert C-program test generator. Use the supplied I/O-format analysis, complete oracle.c, "
+        "optional problem description, and teacher sample I/O. Cross-check the analysis against every input read. "
+        "scanf whitespace may be interchangeable; fgets/getchar or explicit parsing can make line breaks, spaces, "
+        "or characters significant. Never impose a layout the code does not require.\n\n"
+        "Every returned test must be one complete, semantically valid stdin input accepted by the program from "
+        "the first byte through EOF. Include no labels, comments, explanations, missing fields, or extra tokens.\n\n"
+        "Trace reads, branches, loops, and termination rules. Identify fixed-size, count-prefixed, repeated, "
+        "sentinel-terminated, EOF-terminated, conditional, line-based, and token-based input as applicable. "
+        "Respect field types, counts, delimiters, order, exact characters, and relationships. Keep edge cases "
+        "within the legal constraints; do not assume empty input, negatives, or extreme values are valid.\n\n"
+        "Vary sizes only when the grammar permits it; for fixed-size formats, vary values and relationships. "
+        "Return fewer cases rather than malformed or uncertain cases. Before responding, internally trace every "
+        "candidate through all reads to EOF and discard any candidate with missing, extra, malformed, wrongly "
+        "counted, or uncertain fields. Do not repair candidates.\n\n"
+        "Return only valid JSON with exactly these keys: io_tests and edge_cases. Each value is an array of "
+        "strings; every string must contain only the exact stdin for one run. Preserve required separators and "
+        "line breaks, and do not add a trailing newline unless the format allows or requires it."
     )
 
-    sample_sec = f"\nTeacher's Sample Input:\n```\n{sample_input}\n```\n" if sample_input else ""
-    output_sec = f"\nTeacher's Sample Output:\n```\n{sample_output}\n```\n" if sample_output else ""
+    sample_sec = f"\nTeacher's Sample Input:\n```\n{sample_input}\n```\n" if sample_input is not None else ""
+    output_sec = f"\nTeacher's Sample Output:\n```\n{sample_output}\n```\n" if sample_output is not None else ""
     desc_sec = f"\nProblem Description:\n{problem_description}\n" if problem_description else ""
-
-    io_results: list[str] = []
-    edge_results: list[str] = []
+    format_sec = (
+        f"\nOracle I/O Format Analysis:\n{io_format}\n"
+        if io_format
+        else "\nOracle I/O Format Analysis:\nUnavailable; infer the input grammar from the oracle and teacher context.\n"
+    )
 
     needed_io = max(1, num_io)
     needed_edge = max(1, num_edge)
@@ -196,15 +238,23 @@ def generate_tests_with_llm(
 
     user_prompt = (
         f"Problem Identifier: {problem_id}\n"
-        f"{desc_sec}{sample_sec}{output_sec}\n"
+        f"{format_sec}{desc_sec}{sample_sec}{output_sec}\n"
         f"Reference Implementation (oracle.c):\n```c\n{oracle_code}\n```\n\n"
-        f"Task: Generate exactly {needed_io} diverse 'io_tests' and {needed_edge} 'edge_cases'.\n\n"
+        f"Task: Generate and self-audit up to {needed_io} 'io_tests' and {needed_edge} 'edge_cases'. Return fewer "
+        "rather than include any input that does not strictly conform.\n\n"
         "EXECUTION RULES:\n"
-        "- Generate entirely NEW inputs. Do not simply reproduce the sample case.\n"
-        "- Ensure every test case string perfectly matches the input format expected by the oracle's scanf/fgets calls.\n"
-        "- Make the 'io_tests' highly variable in size and data variation.\n"
-        "- Make the 'edge_cases' intentionally tricky to break fragile code (empty cases, max values, off-by-one setups).\n"
-        "- EVERY string must end with a trailing escaped newline (`\\n`).\n"
+        "- Follow the Oracle I/O Format Analysis and trace the C source; do not assume the sample's line breaks "
+        "are significant unless the reader makes them significant.\n"
+        "- Check every count, branch-dependent field, record terminator, and sentinel/EOF condition. Include no "
+        "missing or extra input.\n"
+        "- Respect all input constraints and required data properties described by the code, sample I/O, and problem.\n"
+        "- Generate inputs distinct from the sample when a valid alternative is clear.\n"
+        "- Vary sizes only for variable-size grammars; vary values and relationships for fixed-size grammars.\n"
+        "- 'edge_cases': legal boundary cases only; never deliberately malformed input.\n"
+        "- Preserve each input string exactly as the complete stdin for one execution; do not require or add a "
+        "trailing newline unless the input contract calls for it.\n"
+        "- Before answering, internally trace every input read for every candidate from start to EOF. Discard any "
+        "candidate with a missing, extra, malformed, wrongly counted, or uncertain field. Do not repair candidates.\n"
         "- Output ONLY the raw JSON object. Do not include markdown formatting blocks (```json) or conversational filler."
     )
 
@@ -213,135 +263,34 @@ def generate_tests_with_llm(
         model=model,
         temperature=gen_temp,
         seed=gen_seed,
-        num_predict=800,
+        num_predict=450,
         timeout=100.0
     )
 
-    if isinstance(res, dict):
-        for s in res.get("io_tests", []):
-            st_clean = str(s).strip()
-            if st_clean and st_clean + "\n" not in io_results:
-                io_results.append(st_clean + "\n")
-        for s in res.get("edge_cases", []):
-            st_clean = str(s).strip()
-            if st_clean and st_clean + "\n" not in edge_results:
-                edge_results.append(st_clean + "\n")
+    raw_io = res.get("io_tests", []) if isinstance(res, dict) else []
+    raw_edge = res.get("edge_cases", []) if isinstance(res, dict) else []
+    if not isinstance(raw_io, list):
+        raw_io = []
+    if not isinstance(raw_edge, list):
+        raw_edge = []
+    candidate_io = list(dict.fromkeys(
+        value for value in raw_io[:needed_io] if isinstance(value, str)
+    ))
+    candidate_edge = list(dict.fromkeys(
+        value for value in raw_edge[:needed_edge] if isinstance(value, str)
+    ))
 
-    rng = random.Random(gen_seed)
-    while len(io_results) < needed_io and io_results:
-        base = io_results[len(io_results) % len(io_results)]
-        lines = [l.strip() for l in base.strip().split("\n") if l.strip()]
-        if len(lines) == 2:
-            body_parts = lines[1].split()
-            perm = list(body_parts)
-            rng.shuffle(perm)
-            var_inp = f"{lines[0]}\n" + " ".join(perm) + "\n"
-            if var_inp not in io_results:
-                io_results.append(var_inp)
-            else:
-                break
-        elif len(lines) == 1:
-            tokens = lines[0].split()
-            offset = rng.randint(2, 10)
-            mut_tokens = []
-            for t in tokens:
-                try:
-                    mut_tokens.append(str(int(t) + offset))
-                except ValueError:
-                    mut_tokens.append(t)
-            var_inp = " ".join(mut_tokens) + "\n"
-            if var_inp not in io_results:
-                io_results.append(var_inp)
-            else:
-                break
-        else:
-            break
-
-    normalized_io = [_ensure_multiline_format(inp, sample_input) for inp in io_results]
-    normalized_edge = [_ensure_multiline_format(inp, sample_input) for inp in edge_results]
-
-    return {
-        "io_tests": normalized_io[:needed_io],
-        "edge_cases": normalized_edge[:needed_edge]
-    }
-
-
-def _ensure_multiline_format(inp_str: str, sample_input: Optional[str]) -> str:
-    """
-    Validates and normalizes LLM-generated input text.
-    If Line 1 contains a size N and Line 2 contains an array, guarantees
-    that N matches the actual number of elements supplied on Line 2, preventing
-    scanf from reading uninitialized memory.
-    """
-    if not inp_str:
-        return "\n"
-
-    lines = [l.strip() for l in inp_str.strip().split("\n") if l.strip()]
-    if not lines:
-        return "\n"
-
-    if len(lines) == 1 and sample_input and "\n" in sample_input.strip():
-        sample_lines = [l.strip() for l in sample_input.strip().split("\n") if l.strip()]
-        k = len(sample_lines[0].split())
-        tokens = lines[0].split()
-        if len(tokens) > k:
-            lines = [" ".join(tokens[:k]), " ".join(tokens[k:])]
-
-    if len(lines) == 2:
-        header_tokens = lines[0].split()
-        body_tokens = lines[1].split()
-        if header_tokens and body_tokens:
-            try:
-                size_val = int(header_tokens[0])
-                actual_len = len(body_tokens)
-                if size_val > 0 and size_val != actual_len:
-                    header_tokens[0] = str(actual_len)
-                    lines[0] = " ".join(header_tokens)
-            except ValueError:
-                pass
-
-    return "\n".join(lines) + "\n"
+    return {"io_tests": candidate_io, "edge_cases": candidate_edge}
 
 
 # ---------------------------------------------------------------------------
-# Emergency Structural Fuzzer (Only if LLM server is unreachable)
+# Emergency Structural Fuzzer (Only if Ollama is unreachable)
 # ---------------------------------------------------------------------------
 
 def emergency_fallback_tests(sample_input: Optional[str], num_io: int, num_edge: int) -> dict:
-    """
-    Universal structural mutation of the teacher's sample input
-    used strictly if Ollama is unreachable.
-    """
-    rng = random.Random(42)
-    io_cases = []
-    edge_cases = []
-
-    if sample_input and sample_input.strip():
-        lines = [l.strip() for l in sample_input.strip().split("\n") if l.strip()]
-        io_cases.append(sample_input.strip() + "\n")
-        for _ in range(num_io - 1):
-            mutated_lines = []
-            for l in lines:
-                parts = l.split()
-                mut = []
-                for p in parts:
-                    try:
-                        val = int(p)
-                        mut.append(str(val + rng.randint(-3, 5)))
-                    except ValueError:
-                        mut.append(p)
-                mutated_lines.append(" ".join(mut))
-            io_cases.append("\n".join(mutated_lines) + "\n")
-    else:
-        for i in range(num_io):
-            io_cases.append(f"{i + 1}\n")
-
-    edge_cases = ["0\n", "-1\n", "1\n1\n", "2147483647\n", "-2147483648\n"]
-
-    return {
-        "io_tests": io_cases[:num_io],
-        "edge_cases": edge_cases[:num_edge]
-    }
+    """Use only the teacher-provided sample when no model can validate new inputs."""
+    sample_cases = [sample_input] if sample_input and sample_input.strip() else []
+    return {"io_tests": sample_cases[:num_io], "edge_cases": []}
 
 
 # ---------------------------------------------------------------------------
@@ -360,11 +309,11 @@ def generate_all_test_cases(
     sample_output: Optional[str] = None,
 ) -> dict:
     """
-    Universal test case generator.
-    Writes:
-      problems/<problem>/tests/auto_generated/gen_X.in  &  gen_X.out
-      problems/<problem>/tests/edge_cases/edge_XX.in    &  edge_XX.out
-    """
+        Universal test case generator.
+        Writes:
+            problems/<problem>/tests/auto_generated/gen_X.in  &  gen_X.out
+            problems/<problem>/tests/edge_cases/edge_XX.in    &  edge_XX.out
+        """
     if not tests_dir:
         tests_dir = os.path.join("problems", problem_id, "tests")
     if not oracle_path:
@@ -405,7 +354,6 @@ def generate_all_test_cases(
         if compiled_path and os.path.isfile(compiled_path):
             oracle_bin = compiled_path
 
-        # 3. Generate Inputs with LLM
         test_data = generate_tests_with_llm(
             problem_id=problem_id,
             oracle_code=oracle_code,
@@ -414,15 +362,16 @@ def generate_all_test_cases(
             problem_description=problem_description,
             num_io=num_io,
             num_edge=num_edge,
-            model=DEFAULT_MODEL
+            model=DEFAULT_MODEL,
         )
 
         method = f"ollama-{DEFAULT_MODEL}"
 
-        # If LLM returned empty, use emergency structural mutation
+        # If no I/O case passed validation, retain only the known-valid teacher sample.
         if not test_data.get("io_tests"):
-            test_data = emergency_fallback_tests(sample_input, num_io, num_edge)
-            method = "sample-input-fuzzer"
+            fallback = emergency_fallback_tests(sample_input, num_io, num_edge)
+            test_data["io_tests"] = fallback["io_tests"]
+            method = "teacher-sample-fallback"
 
         io_inputs = test_data.get("io_tests", [])[:num_io]
         edge_inputs = test_data.get("edge_cases", [])[:num_edge]
@@ -449,7 +398,7 @@ def generate_all_test_cases(
             in_file = os.path.join(auto_dir, f"gen_{idx:02d}.in")
             out_file = os.path.join(auto_dir, f"gen_{idx:02d}.out")
 
-            with open(in_file, "w", encoding="utf-8") as f_in:
+            with open(in_file, "w", encoding="utf-8", newline="") as f_in:
                 f_in.write(inp)
 
             expected_out = ""
@@ -475,7 +424,7 @@ def generate_all_test_cases(
             in_file = os.path.join(edge_dir, f"edge_{idx:02d}.in")
             out_file = os.path.join(edge_dir, f"edge_{idx:02d}.out")
 
-            with open(in_file, "w", encoding="utf-8") as f_in:
+            with open(in_file, "w", encoding="utf-8", newline="") as f_in:
                 f_in.write(inp)
 
             expected_out = ""
