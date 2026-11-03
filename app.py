@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Authenticated student and teacher portal for the C-Grade engine."""
+# """Authenticated student and teacher portal for the C-Grade engine."""
 
 #TEACHER_USERNAME=
 #TEACHER_PASSWORD=
@@ -55,14 +55,6 @@ COMPLEXITY_OPTIONS = [
     "O(2^N)",
     "O(N!)",
     "O(N^N)",
-]
-
-INPUT_TYPE_OPTIONS = [
-    "integer_array",
-    "string",
-    "fixed_arithmetic",
-    "single_number",
-    "raw_array",
 ]
 
 st.markdown(
@@ -297,29 +289,38 @@ def build_text_grading_report(
         for s in suggestions:
             lines.append(f"- {s}")
 
+    # --- Usefulness & limitations of this evaluation ---
     lines.append("--- Usefulness & limitations of this evaluation ---")
     lines.append("Useful for:")
-    lines.append("1. Coding-interview and hiring screens")
-    lines.append("   Example: a company runs 500 candidate submissions for an")
-    lines.append(f"   '{assignment_title or 'given'}' task. The agent ranks them by")
-    lines.append("   correctness, edge-case handling and memory safety, and gives")
-    lines.append("   a score for each metric.")
-    lines.append("   Benefit: fast first-round filtering where every rejection can")
-    lines.append("   be explained metric by metric.\n")
-    lines.append("2. Plagiarism and LLM-copy triage for instructors")
-    lines.append("   Example: two submissions reach a similarity of 0.93, above the")
-    lines.append("   0.85 threshold, so the agent flags them. The instructor checks")
-    lines.append("   only those pairs instead of all 300 submissions.")
-    lines.append("   Benefit: saves review time by limiting manual checking to")
-    lines.append("   suspicious cases.\n")
+    lines.append("1. Multi-dimensional technical grading (beyond pass/fail)")
+    lines.append("   Unlike standard CP judges that only verify I/O, C-Grade evaluates")
+    lines.append(f"   runtime memory safety (ASan/UBSan), asymptotic scaling for '{assignment_title or 'task'}',")
+    lines.append("   function modularity, compiler warnings, and clean formatting.")
+    lines.append("   Benefit: Enforces production-level C safety, memory hygiene, and")
+    lines.append("   proper algorithmic design, not just hacking tests to green.\n")
+    lines.append("2. Academic integrity & LLM-generated code triage")
+    lines.append("   AST-based structural matching and token diagnostics detect code")
+    lines.append("   obfuscation (renamed identifiers) and plagiarism against class submissions.")
+    lines.append("   Benefit: Saves instructor time by isolating suspicious code pairs")
+    lines.append("   with actionable diagnostic metrics.\n")
+    lines.append("3. Transparent, actionable debugging evidence")
+    lines.append("   Pinpoints exact input/output divergences, sanitizer stack traces,")
+    lines.append("   and compiler diagnostic hints line-by-line.")
+    lines.append("   Benefit: Full transparency for students; every deduction is backed")
+    lines.append("   by reproducible execution evidence.\n")
     lines.append("Limits of this report:")
-    lines.append("1. Tests cannot prove correctness")
-    lines.append("   Example: a submission passes all 10 hidden tests but fails when")
-    lines.append("   the input has extra whitespace or a trailing newline that no test")
-    lines.append("   covers. The agent still reports 10/10.")
-    lines.append("   Fix: the agent creates its own extra tricky test inputs and")
-    lines.append("   compares the student's answers with the answers of a correct")
-    lines.append("   program.")
+    lines.append("1. Dynamic testing does not equal formal verification")
+    lines.append("   Passing generated and adversarial tests proves correctness on those inputs,")
+    lines.append("   not mathematical completeness. Uncovered edge cases or platform-specific")
+    lines.append("   undefined behaviors might still exist.")
+    lines.append("2. Empirical complexity curve fitting")
+    lines.append("   Complexity is measured by profiling instructions across scaling input sizes.")
+    lines.append("   Aggressive compiler optimizations (-O2) or hardware cache thresholds")
+    lines.append("   can occasionally produce borderline fits on transitional problem sizes.")
+    lines.append("3. Static and LLM style heuristics")
+    lines.append("   Modularity thresholds and LLM readability assessments evaluate conventions")
+    lines.append("   and formatting; they serve as automated guidance, not an absolute substitute")
+    lines.append("   for detailed instructor code mentoring.")
 
     return "\n".join(lines)
 
@@ -518,15 +519,13 @@ def new_assignment_view(assignments) -> None:
                 height=80,
                 key=f"new_assignment_sample_{form_version}",
             )
-        with col2:
-            input_type = st.selectbox(
-                "Complexity generator input type",
-                INPUT_TYPE_OPTIONS,
-                index=INPUT_TYPE_OPTIONS.index(saved_form.get("input_type", "integer_array"))
-                if saved_form.get("input_type", "integer_array") in INPUT_TYPE_OPTIONS
-                else 0,
-                key=f"new_assignment_input_type_{form_version}",
+            sample_output = st.text_area(
+                "Sample output",
+                value=saved_form.get("sample_output", "30"),
+                height=80,
+                key=f"new_assignment_sample_output_{form_version}",
             )
+        with col2:
             expected_complexity = st.selectbox(
                 "Expected asymptotic complexity",
                 COMPLEXITY_OPTIONS,
@@ -596,7 +595,8 @@ int main() {
             time_limit=time_limit,
             memory_limit=memory_limit,
             sample_input=sample_input,
-            input_type=input_type,
+            sample_output=sample_output,
+            input_type="integer_array",
             expected_complexity=expected_complexity,
             auto_gen_count=auto_gen_count,
             enabled={
@@ -644,6 +644,7 @@ int main() {
                 tests_dir=str(tests_dir),
                 oracle_path=str(oracle_path),
                 sample_input=sample_input,
+                sample_output=sample_output,
                 problem_description=description,
                 num_io=int(auto_gen_count),
                 num_edge=5,
@@ -787,21 +788,18 @@ def assignment_materials_view(assignments) -> None:
                 height=120,
                 key=f"edit_smoke_{problem_id}",
             )
+            edited_sample_output = st.text_area(
+                "Sample output",
+                value=str(rules_data.get("sample_output", "")),
+                height=120,
+                key=f"edit_sample_output_{problem_id}",
+            )
             edited_io_count = st.number_input(
                 "Generated I/O count", min_value=1, max_value=30,
                 value=max(1, min(30, io_rule_count)), step=1,
                 key=f"edit_io_count_{problem_id}",
             )
         with config_col2:
-            current_input_type = complexity_params.get("input_type", "integer_array")
-            edited_input_type = st.selectbox(
-                "Complexity generator input type",
-                INPUT_TYPE_OPTIONS,
-                index=INPUT_TYPE_OPTIONS.index(current_input_type)
-                if current_input_type in INPUT_TYPE_OPTIONS
-                else 0,
-                key=f"edit_input_type_{problem_id}",
-            )
             current_complexity = complexity_params.get("expected_complexity", "O(N)")
             edited_complexity = st.selectbox(
                 "Expected asymptotic complexity",
@@ -824,11 +822,12 @@ def assignment_materials_view(assignments) -> None:
             rules_data["time_limit_s"] = float(edited_time)
             rules_data["memory_limit_mb"] = int(edited_memory)
             rules_data["smoke_input"] = edited_smoke
+            rules_data["sample_output"] = edited_sample_output
             for metric in rules_data.get("metrics", []):
                 if metric.get("analyzer") == "io_tests":
                     metric.setdefault("params", {})["num_generated_tests"] = int(edited_io_count)
                 if metric.get("analyzer") == "complexity_estimator":
-                    metric.setdefault("params", {})["input_type"] = edited_input_type
+                    metric.setdefault("params", {})
                     metric["params"]["expected_complexity"] = edited_complexity
             rules_path.write_text(json.dumps(rules_data, indent=2), encoding="utf-8")
             st.session_state[f"rules_editor_{problem_id}"] = json.dumps(rules_data, indent=2)
@@ -842,6 +841,7 @@ def assignment_materials_view(assignments) -> None:
                             tests_dir=str(tests_dir),
                             oracle_path=str(oracle_path),
                             sample_input=edited_smoke,
+                            sample_output=edited_sample_output,
                             problem_description=assignment["description"] or "",
                             num_io=int(edited_io_count),
                             num_edge=int(edited_edge_count),
