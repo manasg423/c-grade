@@ -18,3 +18,8 @@ portal.db-shm
 portal.db-wal
 .github/
 .streamlit/
+analyzers/complexity_test_app.py
+testing/complexity_test_cases.zip
+testing/expected_complexity.csv
+testing/expected_complexity2.csv
+testing/c_sources
