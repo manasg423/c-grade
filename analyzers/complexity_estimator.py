@@ -902,6 +902,11 @@ def _evaluate_universal(source_path: str, params: dict, limits: dict):
     max_success = max(min_success, int(params.get("max_measurements", 7)))
     max_n = max(2, int(params.get("adaptive_max_n", 256)))
     fixed_sizes = [int(x) for x in params.get("input_sizes", [])]
+    initial_max_n = max([max_n, *fixed_sizes])
+    refinement_max_n = max(
+        initial_max_n,
+        int(params.get("adaptive_refinement_max_n", initial_max_n * 4)),
+    )
     adaptive = bool(params.get("adaptive_input_sizes", not bool(fixed_sizes)))
     with open(source_path, encoding="utf-8", errors="replace") as source_handle:
         source_for_schedule = source_handle.read()
@@ -1022,6 +1027,92 @@ def _evaluate_universal(source_path: str, params: dict, limits: dict):
          adaptive_stopping_reason) = _collect_with_timeout_fallback(
             binary, dimensions, get_input, timeout, max_success
         )
+
+        # Confidence-triggered refinement is deliberately additive: the first
+        # profiling pass and its schedule remain unchanged. Only ambiguous or
+        # poor fits receive a small number of larger, well-separated samples.
+        # Refinement is useful with explicit input_sizes too: fixed initial
+        # schedules often stop exactly where O(N) and O(N log N), or nearby
+        # exponential bases, are still indistinguishable. Keep the original
+        # schedule untouched and append only a few confidence-driven samples.
+        refinement_budget = max(0, int(params.get("adaptive_refinement_measurements", 3)))
+        refinement_attempts = 0
+        refinement_stop = "Not needed; initial fit was sufficiently decisive."
+        if len(measurements) >= min_success and refinement_budget:
+            provisional_fit = fit_growth(measurements, params.get("fit_config", {}))
+            while (provisional_fit.get("needs_more_measurements")
+                   and refinement_attempts < refinement_budget):
+                ordered_measurements = sorted(measurements, key=lambda row: row["n"])
+                last = ordered_measurements[-1]
+                previous = ordered_measurements[-2] if len(ordered_measurements) > 1 else None
+                if branching_recursion:
+                    # Avoid geometric jumps for branching recursion (e.g.
+                    # Fibonacci); a small additive step gives useful growth
+                    # evidence without immediately making the next run huge.
+                    recursive_step = max(1, int(params.get("adaptive_recursive_step", 2)))
+                    candidate_n = int(last["n"]) + recursive_step
+                else:
+                    candidate_n = _next_size(
+                        int(last["n"]), int(last["cost"]),
+                        int(previous["n"]) if previous else None,
+                        int(previous["cost"]) if previous else None,
+                        refinement_max_n, params,
+                    )
+                already_used = {int(row["n"]) for row in measurements}
+                if candidate_n in already_used or candidate_n <= int(last["n"]):
+                    refinement_stop = "No new input dimension is available for refinement."
+                    break
+                if safe_n is not None and candidate_n > safe_n:
+                    refinement_stop = (f"Refinement stopped at N={candidate_n}: inferred safe input "
+                                       f"capacity is N={safe_n}.")
+                    break
+                raw_stdin = get_input(candidate_n)
+                if not builder:
+                    # Re-audit the expanded batch so a scalar dimension that
+                    # stops changing at larger N cannot silently enter the fit.
+                    _audit_materialized_batch(spec, generation_cache)
+                started = time.monotonic()
+                try:
+                    measured = profile_one(binary, raw_stdin, timeout=timeout)
+                    elapsed = time.monotonic() - started
+                    existing_methods = {row["method"] for row in measurements}
+                    if existing_methods and measured["method"] not in existing_methods:
+                        validation.append({"n": candidate_n, "valid": False,
+                                           "reason": "measurement_method_changed_during_refinement"})
+                        refinement_stop = "Refinement stopped because the profiling counter method changed."
+                        break
+                    measurements.append({"n": candidate_n, "cost": int(measured["cost"]),
+                                          "method": measured["method"],
+                                          "elapsed_s": round(elapsed, 6),
+                                          "adaptive_refinement": True})
+                    validation.append({"n": candidate_n, "valid": True,
+                                       "stdin_bytes": len(raw_stdin.encode("utf-8")),
+                                       "profiling_elapsed_s": round(elapsed, 6),
+                                       "adaptive_refinement": True})
+                    attempt_count += 1
+                    refinement_attempts += 1
+                    provisional_fit = fit_growth(measurements, params.get("fit_config", {}))
+                    refinement_stop = "Additional samples collected and model refitted."
+                except subprocess.TimeoutExpired:
+                    timeout_count += 1
+                    validation.append({"n": candidate_n, "valid": False,
+                                       "reason": "program_timeout", "adaptive_refinement": True})
+                    attempt_count += 1
+                    refinement_attempts += 1
+                    refinement_stop = f"Refinement stopped because N={candidate_n} timed out."
+                    break
+                except Exception as exc:
+                    validation.append({"n": candidate_n, "valid": False,
+                                       "reason": str(exc), "adaptive_refinement": True})
+                    if "Callgrind" in str(exc) or "Valgrind" in str(exc):
+                        raise
+                    refinement_stop = f"Refinement stopped after profiling error: {exc}"
+                    break
+            if not provisional_fit.get("needs_more_measurements"):
+                refinement_stop = "Model ambiguity/residual warning cleared after refinement."
+            elif refinement_attempts >= refinement_budget:
+                refinement_stop = "Refinement budget exhausted; result remains uncertain."
+        adaptive_stopping_reason = (adaptive_stopping_reason + " " + refinement_stop).strip()
 
         methods = sorted({row["method"] for row in measurements})
         plot_data = sorted(
