@@ -57,14 +57,6 @@ COMPLEXITY_OPTIONS = [
     "O(N^N)",
 ]
 
-INPUT_TYPE_OPTIONS = [
-    "integer_array",
-    "string",
-    "fixed_arithmetic",
-    "single_number",
-    "raw_array",
-]
-
 st.markdown(
     """
     <style>
@@ -519,14 +511,6 @@ def new_assignment_view(assignments) -> None:
                 key=f"new_assignment_sample_{form_version}",
             )
         with col2:
-            input_type = st.selectbox(
-                "Complexity generator input type",
-                INPUT_TYPE_OPTIONS,
-                index=INPUT_TYPE_OPTIONS.index(saved_form.get("input_type", "integer_array"))
-                if saved_form.get("input_type", "integer_array") in INPUT_TYPE_OPTIONS
-                else 0,
-                key=f"new_assignment_input_type_{form_version}",
-            )
             expected_complexity = st.selectbox(
                 "Expected asymptotic complexity",
                 COMPLEXITY_OPTIONS,
@@ -596,7 +580,7 @@ int main() {
             time_limit=time_limit,
             memory_limit=memory_limit,
             sample_input=sample_input,
-            input_type=input_type,
+            input_type="integer_array",
             expected_complexity=expected_complexity,
             auto_gen_count=auto_gen_count,
             enabled={
@@ -793,15 +777,6 @@ def assignment_materials_view(assignments) -> None:
                 key=f"edit_io_count_{problem_id}",
             )
         with config_col2:
-            current_input_type = complexity_params.get("input_type", "integer_array")
-            edited_input_type = st.selectbox(
-                "Complexity generator input type",
-                INPUT_TYPE_OPTIONS,
-                index=INPUT_TYPE_OPTIONS.index(current_input_type)
-                if current_input_type in INPUT_TYPE_OPTIONS
-                else 0,
-                key=f"edit_input_type_{problem_id}",
-            )
             current_complexity = complexity_params.get("expected_complexity", "O(N)")
             edited_complexity = st.selectbox(
                 "Expected asymptotic complexity",
@@ -828,7 +803,7 @@ def assignment_materials_view(assignments) -> None:
                 if metric.get("analyzer") == "io_tests":
                     metric.setdefault("params", {})["num_generated_tests"] = int(edited_io_count)
                 if metric.get("analyzer") == "complexity_estimator":
-                    metric.setdefault("params", {})["input_type"] = edited_input_type
+                    metric.setdefault("params", {})
                     metric["params"]["expected_complexity"] = edited_complexity
             rules_path.write_text(json.dumps(rules_data, indent=2), encoding="utf-8")
             st.session_state[f"rules_editor_{problem_id}"] = json.dumps(rules_data, indent=2)
