@@ -15,6 +15,7 @@ import os
 import re
 import glob
 import json
+import json
 import shutil
 import subprocess
 import tempfile
@@ -23,8 +24,10 @@ from typing import Optional
 
 try:
     from .complexity_fitting import fit_growth, _models
+    from .complexity_fitting import fit_growth, _models
     from . import input_spec as _input_spec
 except ImportError:
+    from complexity_fitting import fit_growth, _models
     from complexity_fitting import fit_growth, _models
     import input_spec as _input_spec
 
@@ -156,6 +159,27 @@ def _is_input_failure_guard(source: str, if_start: int, if_close: int) -> Option
     return None
 
 
+
+def _is_input_failure_guard(source: str, if_start: int, if_close: int) -> Optional[int]:
+    """Return the end of an if-guard that only cleans up and exits after bad input."""
+    then_start = if_close + 1
+    while then_start < len(source) and source[then_start].isspace():
+        then_start += 1
+    then_end = _statement_end(source, then_start)
+    after_then = then_end
+    while after_then < len(source) and source[after_then].isspace():
+        after_then += 1
+    if re.match(r"else\b", source[after_then:]):
+        return None
+    body = source[then_start:then_end].strip()
+    # Permit ordinary resource cleanup followed by an unconditional exit.
+    body = re.sub(r"^\{\s*|\s*\}$", "", body)
+    body = re.sub(r"\b(?:free|fclose)\s*\([^;]*\)\s*;", "", body)
+    if re.match(r"^(?:return\b|exit\s*\(|_Exit\s*\(|abort\s*\(|goto\b)", body.strip()):
+        return then_end
+    return None
+
+
 def infer_measurement_boundary(source: str) -> dict:
     """Find a conservative insertion point after the final input-only statement.
 
@@ -192,7 +216,21 @@ def infer_measurement_boundary(source: str) -> dict:
             if loop_match.start() < last.start() < loop_end:
                 loop_contains_last_read = True
                 break
+    # Input guards nested inside a loop are part of that loop's input phase;
+    # placing instrumentation after the guard would execute the start request
+    # repeatedly. Let the loop-nest analysis below choose one outer boundary.
+    loop_contains_last_read = False
+    for loop_match in re.finditer(r"\b(for|while)\s*\(", masked):
+        loop_op = masked.find("(", loop_match.start())
+        loop_cp = _matching(masked, loop_op, "(", ")")
+        if loop_cp is not None:
+            loop_end = _statement_end(masked, loop_cp + 1)
+            if loop_match.start() < last.start() < loop_end:
+                loop_contains_last_read = True
+                break
     for match in re.finditer(r"\bif\s*\(", masked):
+        if loop_contains_last_read:
+            break
         if loop_contains_last_read:
             break
         op = masked.find("(", match.start())
@@ -236,6 +274,25 @@ def infer_measurement_boundary(source: str) -> dict:
 
         if scanf_check:
             operator, number = scanf_check.group(1), int(scanf_check.group(2))
+        # A common safe guard is `if (scanf(...) != k || invalid_input) return;`.
+        # The scanf comparison need not be the final sub-expression.
+        scanf_check = re.match(r"\s*(==|!=|>=|<=|>|<)\s*(-?\d+)", predicate)
+        then_start = cp + 1
+        while then_start < len(masked) and masked[then_start].isspace():
+            then_start += 1
+        then_end = _statement_end(masked, then_start)
+        then_body = masked[then_start:then_end].strip()
+        exits_on_then = bool(re.match(
+            r"(?:\{\s*)?(?:return\b|exit\s*\(|_Exit\s*\(|abort\s*\(|goto\b)",
+            then_body
+        ))
+        after_then = then_end
+        while after_then < len(masked) and masked[after_then].isspace():
+            after_then += 1
+        has_else = re.match(r"else\b", masked[after_then:]) is not None
+
+        if scanf_check:
+            operator, number = scanf_check.group(1), int(scanf_check.group(2))
             success_when_then = {
                 "==": expected == number,
                 "!=": expected != number,
@@ -248,13 +305,24 @@ def infer_measurement_boundary(source: str) -> dict:
             # the condition also contains range checks (n<0, n>MAX, etc.).
             if exits_on_then and not has_else:
                 success_when_then = False
+            # If the then-branch exits, it is the failed-input path even when
+            # the condition also contains range checks (n<0, n>MAX, etc.).
+            if exits_on_then and not has_else:
+                success_when_then = False
         elif re.fullmatch(r"!\s*", prefix):
             return {"supported": False,
                     "reason": "Negated scanf return checks are ambiguous because EOF is -1 (truthy); use an explicit assignment-count comparison."}
         elif not predicate:
             success_when_then = True
+            success_when_then = True
 
         if success_when_then is None:
+            if exits_on_then and not has_else:
+                # The condition includes scanf but cannot be fully parsed. The
+                # only safe assumption is that the branch exits; start after it.
+                conditional_bodies.append((cp - op, then_end, "after_input_guard",
+                                           "Measurement starts after an early-return input guard."))
+                continue
             if exits_on_then and not has_else:
                 # The condition includes scanf but cannot be fully parsed. The
                 # only safe assumption is that the branch exits; start after it.
@@ -300,11 +368,38 @@ def infer_measurement_boundary(source: str) -> dict:
         # loop would re-run __cgrade_start() on every outer iteration and reset
         # the counter repeatedly (only the final row would remain measured).
         start, header_end, end = max(enclosing, key=lambda item: item[2] - item[0])
+        # Choose the outermost enclosing loop. Starting inside a nested inner
+        # loop would re-run __cgrade_start() on every outer iteration and reset
+        # the counter repeatedly (only the final row would remain measured).
+        start, header_end, end = max(enclosing, key=lambda item: item[2] - item[0])
         body = masked[header_end + 1:end]
         # Remove complete input-call statements, then strip nested control
         # headers. This distinguishes pure nested input loops from loops that
         # also accumulate sums, build graphs, update DP state, etc.
+        # Remove complete input-call statements, then strip nested control
+        # headers. This distinguishes pure nested input loops from loops that
+        # also accumulate sums, build graphs, update DP state, etc.
         for match in reversed(list(pattern.finditer(body))):
+            # A common input-only loop uses `if (scanf(...) != k) {
+            # free(...); return; }`. Removing only the scanf token leaves a
+            # malformed-looking guard and makes cleanup look like algorithmic
+            # work. Remove that complete failure guard before deciding whether
+            # the surrounding loop also performs computation.
+            removed_guard = False
+            for guard in reversed(list(re.finditer(r"\bif\s*\(", body[:match.start()]))):
+                guard_op = body.find("(", guard.start())
+                guard_cp = _matching(body, guard_op, "(", ")")
+                if guard_cp is None or not (guard.start() < match.start() < guard_cp):
+                    continue
+                guard_end = _is_input_failure_guard(body, guard.start(), guard_cp)
+                if guard_end is not None:
+                    body = (body[:guard.start()] +
+                            (" " * (guard_end - guard.start()) ) +
+                            body[guard_end:])
+                    removed_guard = True
+                    break
+            if removed_guard:
+                continue
             # A common input-only loop uses `if (scanf(...) != k) {
             # free(...); return; }`. Removing only the scanf token leaves a
             # malformed-looking guard and makes cleanup look like algorithmic
@@ -339,7 +434,15 @@ def infer_measurement_boundary(source: str) -> dict:
             # Start before the outermost loop so no repeated start/reset occurs.
             return {"supported": True, "offset": start, "mode": "before_mixed_input_loop",
                     "reason": "The final input loop nest also performs computation; measurement starts before the outermost loop so that work is not omitted. Input-reading overhead is included."}
+        body = re.sub(r"\b(?:for|while|if|switch)\s*\([^)]*\)", " ", body)
+        body = re.sub(r"\b(?:continue|break|return)\b", " ", body)
+        if re.sub(r"[{}()\s;]", "", body):
+            # Mixed loops often perform essential work while consuming input.
+            # Start before the outermost loop so no repeated start/reset occurs.
+            return {"supported": True, "offset": start, "mode": "before_mixed_input_loop",
+                    "reason": "The final input loop nest also performs computation; measurement starts before the outermost loop so that work is not omitted. Input-reading overhead is included."}
         return {"supported": True, "offset": end, "mode": "after_input_loop",
+                "reason": "Measurement starts immediately after the outermost input-only loop nest."}
                 "reason": "Measurement starts immediately after the outermost input-only loop nest."}
 
     return {"supported": True, "offset": _statement_end(masked, close_pos + 1),
@@ -594,6 +697,31 @@ def _extract_log_factor(expression: str):
     return 0.0, expression
 
 
+def _extract_log_factor(expression: str):
+    """Remove one log(N) factor and return its exponent (default 1)."""
+    number = r"([0-9]+(?:\.[0-9]+)?)"
+    patterns = (
+        # (logN)^p, (log(N))^p, logN^p, and log(N)^p
+        re.compile(r"\((?:log\(n\)|logn)\)\^" + number),
+        re.compile(r"(?:log\(n\)|logn)\^" + number),
+        # log^pN and log^p(N)
+        re.compile(r"log\^" + number + r"(?:\(n\)|n)"),
+        # Unpowered logN / log(N), optionally parenthesized
+        re.compile(r"\((?:log\(n\)|logn)\)"),
+        re.compile(r"(?:log\(n\)|logn)"),
+    )
+    for index, pattern in enumerate(patterns):
+        match = pattern.search(expression)
+        if not match:
+            continue
+        if index in (0, 1, 2):
+            power = float(match.group(1))
+        else:
+            power = 1.0
+        return power, expression[:match.start()] + expression[match.end():]
+    return 0.0, expression
+
+
 def _complexity_rank(label: str):
     """Return an ordered asymptotic signature for supported complexity labels.
 
@@ -799,6 +927,13 @@ def _collect_with_timeout_fallback(binary: str, dimensions: list[int],
         except Exception as exc:
             validation.append({"n": n, "valid": False, "reason": str(exc),
                                **({"timeout_fallback": True} if is_fallback else {})})
+            message = str(exc)
+            # A zero Ir profile usually means the instrumented start point was
+            # not reached (invalid input/early return), not that Valgrind itself
+            # is unavailable. Keep the failed sample in diagnostics and allow
+            # other safe dimensions to proceed.
+            if ("Callgrind produced no positive Ir total" not in message
+                    and ("Callgrind" in message or "Valgrind" in message)):
             message = str(exc)
             # A zero Ir profile usually means the instrumented start point was
             # not reached (invalid input/early return), not that Valgrind itself
@@ -1101,8 +1236,20 @@ def _evaluate_universal(source_path: str, params: dict, limits: dict):
 
     safe_n = (_input_spec.maximum_safe_dimension(spec, source_for_schedule)
               if spec is not None else None)
+    safe_n = (_input_spec.maximum_safe_dimension(spec, source_for_schedule)
+              if spec is not None else None)
     if safe_n is not None:
         dimensions = [n for n in dimensions if n <= safe_n]
+        # Adaptive schedules for bounded recursion/exponential programs can
+        # contain fewer than five geometric points. Fill with distinct smaller
+        # valid dimensions instead of rejecting a perfectly usable range.
+        if adaptive and len(dimensions) < min_success:
+            candidates = [n for n in range(2, safe_n + 1) if n not in set(dimensions)]
+            for candidate in candidates:
+                dimensions.append(candidate)
+                if len(dimensions) >= min(max_success, min_success + 2):
+                    break
+            dimensions = sorted(set(dimensions))
         # Adaptive schedules for bounded recursion/exponential programs can
         # contain fewer than five geometric points. Fill with distinct smaller
         # valid dimensions instead of rejecting a perfectly usable range.
@@ -1118,11 +1265,19 @@ def _evaluate_universal(source_path: str, params: dict, limits: dict):
             f"Only {len(dimensions)} requested dimensions fit the inferred safe input capacity "
             f"(maximum N={safe_n}); at least {min_success} are required. "
             "Reduce min_successful_measurements or provide a wider valid input range."
+            f"Only {len(dimensions)} requested dimensions fit the inferred safe input capacity "
+            f"(maximum N={safe_n}); at least {min_success} are required. "
+            "Reduce min_successful_measurements or provide a wider valid input range."
         )
 
     builder = params.get("input_builder")
     raw_inputs: dict[int, str] = {}
     generation_diagnostics = []
+    if spec is not None and spec.get("fallback_warning"):
+        generation_diagnostics.append({
+            "warning": "static_input_analysis_fallback",
+            "details": str(spec["fallback_warning"]),
+        })
     if spec is not None and spec.get("fallback_warning"):
         generation_diagnostics.append({
             "warning": "static_input_analysis_fallback",
@@ -1261,6 +1416,9 @@ def _evaluate_universal(source_path: str, params: dict, limits: dict):
                 except Exception as exc:
                     validation.append({"n": candidate_n, "valid": False,
                                        "reason": str(exc), "adaptive_refinement": True})
+                    message = str(exc)
+                    if ("Callgrind produced no positive Ir total" not in message
+                            and ("Callgrind" in message or "Valgrind" in message)):
                     message = str(exc)
                     if ("Callgrind produced no positive Ir total" not in message
                             and ("Callgrind" in message or "Valgrind" in message)):
@@ -1607,6 +1765,9 @@ def evaluate(source_path: str, binary_path: Optional[str] = None,
             "counter": result.get("measurement_note", "Callgrind instruction counts"),
             "expected_complexity": expected,
             "detected_complexity": detected,
+            "empirical_detected_complexity": empirical_detected,
+            "complexity_estimate_source": estimate_source,
+            "ollama_fallback": fallback if fallback else None,
             "empirical_detected_complexity": empirical_detected,
             "complexity_estimate_source": estimate_source,
             "ollama_fallback": fallback if fallback else None,
