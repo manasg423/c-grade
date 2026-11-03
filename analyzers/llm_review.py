@@ -231,9 +231,7 @@ def evaluate(
         '  "naming": 8.5,\n'
         '  "formatting": 9.0,\n'
         '  "comments": 7.5,\n'
-        '  "summary": "Professional 1-2 sentence evaluation.",\n'
-        '  "strengths": ["Strength 1", "Strength 2"],\n'
-        '  "suggestions": ["Suggestion 1", "Suggestion 2"]\n'
+        '  "summary": "Professional 3-4 words  evaluation.",\n'
         "}"
     )
 
@@ -316,24 +314,6 @@ def evaluate(
             feedback_sections = [
                 f"Summary: {summary}"
             ]
-
-            if strengths:
-                feedback_sections.append(
-                    "Key Strengths:\n  - "
-                    + "\n  - ".join(strengths)
-                )
-
-            if suggestions:
-                feedback_sections.append(
-                    "Actionable Improvements:\n  - "
-                    + "\n  - ".join(suggestions)
-                )
-            else:
-                feedback_sections.append(
-                    "Actionable Improvements:\n"
-                    "  - The implementation demonstrates clean code quality "
-                    "and complies with standard readability benchmarks."
-                )
 
             formatted_feedback = "\n\n".join(feedback_sections)
 

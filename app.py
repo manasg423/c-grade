@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import glob
-import base64
 import json
 import os
 import re
@@ -13,6 +12,7 @@ sys.dont_write_bytecode = True
 import uuid
 import csv
 import tempfile
+import textwrap
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
@@ -30,13 +30,34 @@ os.chdir(ROOT)
 import streamlit as st
 
 from database import auth, database
-from core.pdf_reports import build_assessment_pdf
 from core.portal_rules import build_rules
 from test_case_generator import generate_all_test_cases
 
 
 st.set_page_config(page_title="C-Grade Portal", page_icon="C", layout="wide")
 database.initialize_database()
+
+# Asymptotic Big-O complexity options for dropdown
+COMPLEXITY_OPTIONS = [
+    "O(1)",
+    "O(log N)",
+    "O(sqrt(N))",
+    "O(N)",
+    "O(N log N)",
+    "O(N^2)",
+    "O(N^3)",
+    "O(2^N)",
+    "O(N!)",
+    "O(N^N)",
+]
+
+INPUT_TYPE_OPTIONS = [
+    "integer_array",
+    "string",
+    "fixed_arithmetic",
+    "single_number",
+    "raw_array",
+]
 
 st.markdown(
     """
@@ -135,13 +156,158 @@ def evaluation_record(report: dict) -> dict:
     }
 
 
-@st.dialog("C-Grade Assessment PDF", width="large")
-def show_pdf_dialog(pdf_data: str) -> None:
-    st.iframe(
-        f"data:application/pdf;base64,{pdf_data}",
-        height=760,
-        alt="C-Grade assessment report",
-    )
+def build_text_grading_report(
+    report: dict,
+    assignment_title: str = "",
+    filename: str = "",
+    is_student: bool = False,
+) -> str:
+    """Builds the exact plain-text grading report format with full mathematical accuracy and wrapped feedback."""
+    display_file = filename or "submission.c"
+    metrics = report.get("metrics", [])
+
+    total_contribution = 0.0
+    processed_metrics = []
+
+    for m in metrics:
+        name = m.get("name", m.get("analyzer", "unknown"))
+        analyzer = m.get("analyzer", "")
+
+        try:
+            w_val = float(m.get("weight", 0.1))
+            weight_int = int(round(w_val * 100))
+        except Exception:
+            weight_int = 10
+
+        try:
+            score_val = float(m.get("score", 0.0))
+        except Exception:
+            score_val = 0.0
+
+        contrib = round(weight_int * score_val, 1)
+        total_contribution += contrib
+
+        earned_str = f"{int(contrib)}" if contrib.is_integer() else f"{contrib:.1f}"
+        score_str = f"{earned_str}/{weight_int}"
+
+        # 1. Extract proper feedback data
+        raw_fb = m.get("feedback")
+        evidence = m.get("evidence", {})
+
+        # If readability or llm_review feedback is truncated (e.g. "Summary: Th")
+        # pull full summary from evidence if available
+        if (analyzer == "llm_review" or name == "readability") and isinstance(evidence, dict):
+            raw_resp = evidence.get("raw_response", {})
+            if isinstance(raw_resp, dict) and raw_resp.get("summary"):
+                summary_text = str(raw_resp.get("summary", "")).strip()
+                if not raw_fb or len(str(raw_fb).strip()) < 15 or str(raw_fb).strip().endswith("..."):
+                    raw_fb = summary_text
+
+        fb = str(raw_fb or "").strip().replace("\n", " ")
+
+        # 2. Extract up to first full stop
+        if "." in fb:
+            first_part = fb.split(".")[0].strip()
+            if first_part:
+                fb = first_part + "."
+
+        if is_student and any(k in name.lower() or k in analyzer.lower() for k in ("similarity", "originality", "plagiarism")):
+            fb = "similarity verified."
+
+        processed_metrics.append({
+            "name": name,
+            "weight": weight_int,
+            "score_str": score_str,
+            "contrib": contrib,
+            "feedback": fb
+        })
+
+    grade = report.get("grade")
+    if grade is not None:
+        try:
+            grade_val = float(grade)
+        except Exception:
+            grade_val = round(total_contribution, 1)
+    else:
+        grade_val = round(total_contribution, 1)
+
+    lines = [
+        f"===== Grading report for {display_file} =====",
+        f"Overall grade: {grade_val:.1f} / 100",
+        f"{'Metric':<18} {'Weight':>6}  {'Score':>7}  {'Contribution':>12}",
+    ]
+
+    for item in processed_metrics:
+        fb_text = item["feedback"]
+        wrapped_fb = textwrap.wrap(fb_text, width=32) if fb_text else [""]
+        if not wrapped_fb:
+            wrapped_fb = [""]
+
+        prefix = f"{item['name']:<18} {item['weight']:>6}  {item['score_str']:>7}  {item['contrib']:>12.1f}   "
+        lines.append(f"{prefix}{wrapped_fb[0]}")
+
+        indent = " " * len(prefix)
+        for extra in wrapped_fb[1:]:
+            lines.append(f"{indent}{extra}")
+
+    failures = report.get("failures", [])
+    if not failures:
+        for m in metrics:
+            ev = m.get("evidence", {})
+            if isinstance(ev, dict):
+                if ev.get("failures") and isinstance(ev["failures"], list):
+                    failures.extend(ev["failures"])
+                elif ev.get("failed_cases") and isinstance(ev["failed_cases"], list):
+                    failures.extend(ev["failed_cases"])
+
+    if failures:
+        lines.append("--- Where you failed ---")
+        for f in failures:
+            if isinstance(f, dict):
+                tid = str(f.get("test", f.get("label", f.get("id", "Test")))).strip()
+                inp = str(f.get("input", "")).replace("\n", " ").strip()
+                exp = str(f.get("expected", "")).replace("\n", " ").strip()
+                got = str(f.get("got", f.get("actual", f.get("output", "")))).replace("\n", " ").strip()
+                why = str(f.get("why", f.get("reason", f.get("hint", "")))).strip()
+                lines.append(f"{tid:<8} INPUT:    {inp}")
+                lines.append(f"         EXPECTED: {exp}")
+                lines.append(f"         GOT:      {got}")
+                if why:
+                    lines.append(f"         WHY:      {why}")
+            else:
+                lines.append(str(f))
+
+    suggestions = report.get("suggestions", [])
+    if suggestions:
+        lines.append("--- Suggestions to raise the grade ---")
+        for s in suggestions:
+            lines.append(f"- {s}")
+
+    lines.append("--- Usefulness & limitations of this evaluation ---")
+    lines.append("Useful for:")
+    lines.append("1. Coding-interview and hiring screens")
+    lines.append("   Example: a company runs 500 candidate submissions for an")
+    lines.append(f"   '{assignment_title or 'given'}' task. The agent ranks them by")
+    lines.append("   correctness, edge-case handling and memory safety, and gives")
+    lines.append("   a score for each metric.")
+    lines.append("   Benefit: fast first-round filtering where every rejection can")
+    lines.append("   be explained metric by metric.\n")
+    lines.append("2. Plagiarism and LLM-copy triage for instructors")
+    lines.append("   Example: two submissions reach a similarity of 0.93, above the")
+    lines.append("   0.85 threshold, so the agent flags them. The instructor checks")
+    lines.append("   only those pairs instead of all 300 submissions.")
+    lines.append("   Benefit: saves review time by limiting manual checking to")
+    lines.append("   suspicious cases.\n")
+    lines.append("Limits of this report:")
+    lines.append("1. Tests cannot prove correctness")
+    lines.append("   Example: a submission passes all 10 hidden tests but fails when")
+    lines.append("   the input has extra whitespace or a trailing newline that no test")
+    lines.append("   covers. The agent still reports 10/10.")
+    lines.append("   Fix: the agent creates its own extra tricky test inputs and")
+    lines.append("   compares the student's answers with the answers of a correct")
+    lines.append("   program.")
+
+    return "\n".join(lines)
 
 
 def show_report(report: dict, score: float | None, io_score: float | None,
@@ -159,52 +325,24 @@ def show_report(report: dict, score: float | None, io_score: float | None,
     )
     for column, (label, value) in zip(columns, values):
         column.metric(label, f"{value * 100:.1f}%" if value is not None else "N/A")
+
     if feedback:
-        st.markdown("#### Feedback")
+        st.markdown("#### Feedback summary")
         st.write(feedback)
-    visible_metrics = report.get("metrics", [])
-    if not include_private:
-        visible_metrics = [
-            item for item in visible_metrics
-            #if not any(
-                #token in f"{item.get('analyzer', '')} {item.get('name', '')}".lower()
-                #for token in ("similarity", "plagiarism", "originality")
-            #)
-        ]
-    visible_report = report
-    if not include_private:
-        visible_report = dict(report)
-        visible_report["metrics"] = visible_metrics
-        visible_report["flags"] = [
-            flag for flag in report.get("flags", [])
-            #if not any(token in str(flag).lower() for token in ("similarity", "plagiarism", "originality"))
-        ]
-    metrics = visible_metrics
-    if metrics:
-        st.markdown("#### Analyzer breakdown")
-        st.dataframe(
-            [
-                {
-                    "Metric": item.get("name", item.get("analyzer", "")),
-                    "Score": f"{float(item.get('score', 0)) * 100:.1f}%",
-                    "Feedback": item.get("feedback", ""),
-                }
-                for item in metrics
-            ],
-            width="stretch",
-            hide_index=True,
-        )
-    pdf_bytes = build_assessment_pdf(
-        visible_report, score, io_score, quality_score, sanitizer_score, feedback,
-        student_name=student_name,
-        roll_no=roll_no,
+
+    st.markdown("#### Grading report")
+    text_report = build_text_grading_report(
+        report,
         assignment_title=assignment_title,
-        submitted_at=submitted_at,
-        submitted_code=submitted_code,
+        filename=re.sub(r"[^A-Za-z0-9_-]+", "_", assignment_title.lower()).strip("_") + ".c",
+        is_student=(not include_private),
     )
+    st.code(text_report, language="text")
+
     safe_assignment = re.sub(r"[^A-Za-z0-9_-]+", "_", assignment_title or "assessment")
     safe_roll = re.sub(r"[^A-Za-z0-9_-]+", "_", roll_no or "student")
     problem_id = str(report.get("problem", ""))
+
     if re.fullmatch(r"[a-z0-9][a-z0-9_-]*", problem_id):
         report_stem = Path(str(report.get("submission", ""))).stem
         if not report_stem:
@@ -212,24 +350,41 @@ def show_report(report: dict, score: float | None, io_score: float | None,
         report_stem = re.sub(r"[^A-Za-z0-9_-]+", "_", report_stem)
         report_dir = PROBLEMS_DIR / problem_id / "reports"
         report_dir.mkdir(parents=True, exist_ok=True)
-        (report_dir / f"{report_stem}.pdf").write_bytes(pdf_bytes)
-    st.markdown("#### Full assessment report")
-    pdf_data = base64.b64encode(pdf_bytes).decode("ascii")
-    view_key = f"view_report_{safe_assignment}_{safe_roll}_{report.get('generated_at', 'latest')}"
-    download_key = f"download_report_{safe_assignment}_{safe_roll}_{report.get('generated_at', 'latest')}"
-    view_col, download_col = st.columns(2)
-    with view_col:
-        if st.button("View PDF", key=view_key, width="stretch"):
-            show_pdf_dialog(pdf_data)
-    with download_col:
-        st.download_button(
-            "Download PDF report",
-            data=pdf_bytes,
-            file_name=f"{safe_assignment}_{safe_roll}_report.pdf",
-            mime="application/pdf",
-            key=download_key,
-            width="stretch",
+        (report_dir / f"{report_stem}.txt").write_text(text_report, encoding="utf-8")
+
+    download_key = f"download_txt_{safe_assignment}_{safe_roll}_{report.get('generated_at', 'latest')}"
+    st.download_button(
+        "Download report (.txt)",
+        data=text_report,
+        file_name=f"{safe_assignment}_{safe_roll}_report.txt",
+        mime="text/plain",
+        key=download_key,
+        width="stretch",
+    )
+
+    if include_private:
+        st.markdown("---")
+        st.markdown("### 🔒 Teacher Investigation Panel")
+
+        similarity_metric = next(
+            (m for m in report.get("metrics", []) if "similarity" in m.get("analyzer", "") or "originality" in m.get("name", "").lower()),
+            None
         )
+        if similarity_metric:
+            evidence = similarity_metric.get("evidence", {})
+            with st.expander("Plagiarism & Originality Diagnostics", expanded=True):
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Effective Similarity", f"{float(evidence.get('effective_similarity', 0.0))*100:.1f}%")
+                c2.metric("Structural Match", f"{float(evidence.get('structural_match', 0.0))*100:.1f}%")
+                c3.metric("Literal Match", f"{float(evidence.get('literal_match', 0.0))*100:.1f}%")
+                st.write(f"**Most Similar Corpus File:** `{evidence.get('most_similar_file', 'None')}`")
+                if evidence.get("flagged"):
+                    st.error("⚠️ Flagged: Similarity exceeded the plagiarism threshold.")
+                if evidence.get("obfuscation_detected"):
+                    st.warning("⚠️ Obfuscation detected: Code structure matches despite identifier renaming.")
+
+        with st.expander("Raw Evidence & Execution Traces (JSON)"):
+            st.json(report)
 
 
 def login_screen() -> None:
@@ -276,34 +431,78 @@ def new_assignment_view(assignments) -> None:
     st.markdown('<p class="portal-kicker">Course setup</p>', unsafe_allow_html=True)
     st.title("New assignment")
     st.caption("All configuration fields are required. Problem description is optional.")
-    with st.form("assignment_form"):
-        title = st.text_input("Assignment title")
-        description = st.text_area("Problem description (optional)", height=90)
-        problem_id = st.text_input("Problem slug (used for rules and test folders)").strip().lower()
+
+    # Pinned persistent success message: stays visible after deployment
+    if "assignment_deploy_success" in st.session_state:
+        st.success(st.session_state["assignment_deploy_success"])
+
+    saved_form = st.session_state.get("last_assignment_defaults", {})
+    form_version = f"form_{saved_form.get('form_revision', 0)}"
+
+    with st.form(f"assignment_form_{form_version}"):
+        title = st.text_input(
+            "Assignment title",
+            value=saved_form.get("title", ""),
+            key=f"new_assignment_title_{form_version}",
+        )
+        description = st.text_area(
+            "Problem description (optional)",
+            value=saved_form.get("description", ""),
+            height=90,
+            key=f"new_assignment_description_{form_version}",
+        )
+        problem_id = st.text_input(
+            "Problem slug (used for rules and test folders)",
+            value=saved_form.get("problem_id", ""),
+            key=f"new_assignment_slug_{form_version}",
+        ).strip().lower()
         due = st.date_input(
             "Due date",
-            value=date.today() + timedelta(days=7),
+            value=saved_form.get("due", date.today() + timedelta(days=7)),
             min_value=date.today(),
             format="YYYY-MM-DD",
+            key=f"new_assignment_due_{form_version}",
         )
 
         col1, col2 = st.columns(2)
         with col1:
-            time_limit = st.number_input("Time limit (seconds)", min_value=0.5, max_value=10.0, value=1.0, step=0.5)
-            memory_limit = st.number_input("Sandbox memory limit (MB)", min_value=16, max_value=512, value=64, step=16)
-            sample_input = st.text_area("Sample smoke/sanitizer input", value="10 20", height=80)
+            time_limit = st.number_input(
+                "Time limit (seconds)", min_value=0.5, max_value=10.0,
+                value=float(saved_form.get("time_limit", 1.0)), step=0.5,
+                key=f"new_assignment_time_{form_version}",
+            )
+            memory_limit = st.number_input(
+                "Sandbox memory limit (MB)", min_value=16, max_value=512,
+                value=int(saved_form.get("memory_limit", 64)), step=16,
+                key=f"new_assignment_memory_{form_version}",
+            )
+            sample_input = st.text_area(
+                "Sample smoke/sanitizer input",
+                value=saved_form.get("sample_input", "10 20"),
+                height=80,
+                key=f"new_assignment_sample_{form_version}",
+            )
         with col2:
             input_type = st.selectbox(
                 "Complexity generator input type",
-                ["string", "integer_array", "raw_array", "single_number", "fixed_arithmetic"],
+                INPUT_TYPE_OPTIONS,
+                index=INPUT_TYPE_OPTIONS.index(saved_form.get("input_type", "integer_array"))
+                if saved_form.get("input_type", "integer_array") in INPUT_TYPE_OPTIONS
+                else 0,
+                key=f"new_assignment_input_type_{form_version}",
             )
             expected_complexity = st.selectbox(
                 "Expected asymptotic complexity",
-                ["O(1)", "O(log N)", "O(N)", "O(N log N)", "O(N^2)", "O(N^3)"],
+                COMPLEXITY_OPTIONS,
+                index=COMPLEXITY_OPTIONS.index(saved_form.get("expected_complexity", "O(N)"))
+                if saved_form.get("expected_complexity", "O(N)") in COMPLEXITY_OPTIONS
+                else COMPLEXITY_OPTIONS.index("O(N)"),
+                key=f"new_assignment_complexity_{form_version}",
             )
             auto_gen_count = st.number_input(
                 "Auto-generated I/O test cases", min_value=1, max_value=20,
-                value=5, step=1,
+                value=int(saved_form.get("auto_gen_count", 5)), step=1,
+                key=f"new_assignment_io_count_{form_version}",
             )
 
         st.markdown("#### Teacher reference solution (`oracle.c`)")
@@ -320,23 +519,24 @@ int main() {
 """
         oracle_editor = st.text_area(
             "Reference C code (required if no file is uploaded)",
-            value=default_oracle, height=180,
+            value=saved_form.get("oracle_code", default_oracle), height=180,
+            key=f"new_assignment_oracle_{form_version}",
         )
 
         st.markdown("#### Specialist analyzers")
         c1, c2, c3 = st.columns(3)
         with c1:
-            use_io = st.checkbox("io_tests (20%)", value=True)
-            use_edge = st.checkbox("edge_case_runner (10%)", value=True)
-            use_san = st.checkbox("sanitizer_run (10%)", value=True)
+            use_io = st.checkbox("io_tests (20%)", value=saved_form.get("use_io", True), key=f"new_use_io_{form_version}")
+            use_edge = st.checkbox("edge_case_runner (10%)", value=saved_form.get("use_edge", True), key=f"new_use_edge_{form_version}")
+            use_san = st.checkbox("sanitizer_run (10%)", value=saved_form.get("use_san", True), key=f"new_use_san_{form_version}")
         with c2:
-            use_comp = st.checkbox("complexity_estimator (10%)", value=True)
-            use_stat = st.checkbox("static_analysis (10%)", value=True)
-            use_warn = st.checkbox("compiler_warnings (10%)", value=True)
+            use_comp = st.checkbox("complexity_estimator (10%)", value=saved_form.get("use_comp", True), key=f"new_use_comp_{form_version}")
+            use_stat = st.checkbox("static_analysis (10%)", value=saved_form.get("use_stat", True), key=f"new_use_stat_{form_version}")
+            use_warn = st.checkbox("compiler_warnings (10%)", value=saved_form.get("use_warn", True), key=f"new_use_warn_{form_version}")
         with c3:
-            use_func = st.checkbox("function_split (10%)", value=True)
-            use_sim = st.checkbox("similarity_flag (10%)", value=True)
-            use_llm = st.checkbox("llm_review (10%)", value=True)
+            use_func = st.checkbox("function_split (10%)", value=saved_form.get("use_func", True), key=f"new_use_func_{form_version}")
+            use_sim = st.checkbox("similarity_flag (10%)", value=saved_form.get("use_sim", True), key=f"new_use_sim_{form_version}")
+            use_llm = st.checkbox("llm_review (10%)", value=saved_form.get("use_llm", True), key=f"new_use_llm_{form_version}")
         create = st.form_submit_button("Save and deploy assignment", type="primary")
 
     if not create:
@@ -393,7 +593,14 @@ int main() {
     rules_path = problem_dir / f"{problem_id}_rules.json"
     rules_path.write_text(json.dumps(rules, indent=2), encoding="utf-8")
     due_value = datetime.combine(due, time.max).isoformat(timespec="seconds")
-    database.create_assignment(title, description, due_value, problem_id)
+    assignment_id = database.create_assignment(title, description, due_value, problem_id)
+
+    # Reset form revision so all input fields return to blank/default
+    st.session_state["last_assignment_defaults"] = {
+        "form_revision": int(saved_form.get("form_revision", 0)) + 1
+    }
+    st.session_state["materials_assignment_id"] = assignment_id
+
     try:
         with st.spinner("Generating I/O and edge test cases from oracle.c..."):
             generated = generate_all_test_cases(
@@ -406,12 +613,16 @@ int main() {
                 num_edge=5,
                 force_regenerate=True,
             )
-        st.success(
-            f"Assignment deployed. Generated {generated.get('io_count', 0)} I/O and "
-            f"{generated.get('edge_count', 0)} edge cases."
+        # Persistent success message stored in session_state
+        st.session_state["assignment_deploy_success"] = (
+            f"Assignment '{title}' (slug: {problem_id}) deployed successfully! "
+            f"Generated {generated.get('io_count', 0)} I/O and {generated.get('edge_count', 0)} edge test cases."
         )
     except Exception as exc:
-        st.warning(f"Assignment saved; test generation reported: {exc}")
+        st.session_state["assignment_deploy_success"] = (
+            f"Assignment '{title}' deployed, but test case generation noted: {exc}"
+        )
+
     st.rerun()
 
 
@@ -492,8 +703,6 @@ def assignment_materials_view(assignments) -> None:
         None,
     )
     complexity_params = (complexity_metric or {}).get("params", {})
-    input_types = ["string", "integer_array", "raw_array", "single_number", "fixed_arithmetic"]
-    complexities = ["O(1)", "O(log N)", "O(N)", "O(N log N)", "O(N^2)", "O(N^3)"]
 
     st.markdown("#### Assignment configuration")
     with st.form(f"edit_rules_config_{problem_id}"):
@@ -520,16 +729,22 @@ def assignment_materials_view(assignments) -> None:
                 key=f"edit_io_count_{problem_id}",
             )
         with config_col2:
-            current_input_type = complexity_params.get("input_type", input_types[0])
-            current_complexity = complexity_params.get("expected_complexity", complexities[0])
+            current_input_type = complexity_params.get("input_type", "integer_array")
             edited_input_type = st.selectbox(
-                "Complexity generator input type", input_types,
-                index=input_types.index(current_input_type) if current_input_type in input_types else 0,
+                "Complexity generator input type",
+                INPUT_TYPE_OPTIONS,
+                index=INPUT_TYPE_OPTIONS.index(current_input_type)
+                if current_input_type in INPUT_TYPE_OPTIONS
+                else 0,
                 key=f"edit_input_type_{problem_id}",
             )
+            current_complexity = complexity_params.get("expected_complexity", "O(N)")
             edited_complexity = st.selectbox(
-                "Expected asymptotic complexity", complexities,
-                index=complexities.index(current_complexity) if current_complexity in complexities else 0,
+                "Expected asymptotic complexity",
+                COMPLEXITY_OPTIONS,
+                index=COMPLEXITY_OPTIONS.index(current_complexity)
+                if current_complexity in COMPLEXITY_OPTIONS
+                else COMPLEXITY_OPTIONS.index("O(N)"),
                 key=f"edit_complexity_{problem_id}",
             )
             edited_edge_count = st.number_input(
@@ -593,35 +808,6 @@ def assignment_materials_view(assignments) -> None:
         st.success("Oracle source saved.")
         st.rerun()
 
-    st.markdown("#### Edit individual analyzer rules")
-    for metric_index, metric in enumerate(metrics):
-        analyzer = metric.get("analyzer", f"metric_{metric_index}")
-        with st.expander(f"{metric.get('name', analyzer)} · {analyzer}"):
-            with st.form(f"edit_metric_{problem_id}_{metric_index}"):
-                edited_metric_name = st.text_input(
-                    "Rule name", value=str(metric.get("name", analyzer)),
-                    key=f"metric_name_{problem_id}_{metric_index}",
-                )
-                edited_params_text = st.text_area(
-                    "Analyzer parameters (JSON)",
-                    value=json.dumps(metric.get("params", {}), indent=2),
-                    height=180, key=f"metric_params_{problem_id}_{metric_index}",
-                )
-                save_metric = st.form_submit_button("Save this analyzer rule")
-            if save_metric:
-                try:
-                    edited_params = json.loads(edited_params_text)
-                    if not isinstance(edited_params, dict):
-                        raise ValueError("Analyzer parameters must be a JSON object.")
-                    rules_data["metrics"][metric_index]["name"] = edited_metric_name.strip()
-                    rules_data["metrics"][metric_index]["params"] = edited_params
-                    rules_path.write_text(json.dumps(rules_data, indent=2), encoding="utf-8")
-                    st.session_state[f"rules_editor_{problem_id}"] = json.dumps(rules_data, indent=2)
-                    st.success(f"{analyzer} rule saved.")
-                    st.rerun()
-                except (json.JSONDecodeError, ValueError) as exc:
-                    st.error(f"Rule was not saved: {exc}")
-
     st.markdown("#### Deployed rules JSON")
     edited_rules = st.text_area(
         "View or edit rules/<problem>_rules.json",
@@ -642,48 +828,6 @@ def assignment_materials_view(assignments) -> None:
             st.rerun()
         except (json.JSONDecodeError, TypeError, ValueError) as exc:
             st.error(f"Rules were not saved: {exc}")
-
-    st.markdown("#### Regenerate test cases")
-    count1, count2 = st.columns(2)
-    with count1:
-        io_count = st.number_input(
-            "I/O test case count", min_value=1, max_value=30,
-            value=max(1, min(30, io_rule_count)), step=1,
-            key=f"materials_io_count_{problem_id}",
-        )
-    with count2:
-        edge_count = st.number_input(
-            "Edge case count", min_value=1, max_value=20,
-            value=max(1, min(20, len(edge_files) or 5)), step=1,
-            key=f"materials_edge_count_{problem_id}",
-        )
-    if st.button("Regenerate I/O and edge cases from oracle", key=f"regen_tests_{problem_id}"):
-        if not oracle_path.is_file():
-            st.error("Save an oracle.c file before regenerating tests.")
-        else:
-            for metric in rules_data.get("metrics", []):
-                if metric.get("analyzer") == "io_tests":
-                    metric.setdefault("params", {})["num_generated_tests"] = int(io_count)
-            rules_path.write_text(json.dumps(rules_data, indent=2), encoding="utf-8")
-            try:
-                with st.spinner("Generating tests from the saved oracle..."):
-                    generated = generate_all_test_cases(
-                        problem_id,
-                        tests_dir=str(tests_dir),
-                        oracle_path=str(oracle_path),
-                        sample_input=str(rules_data.get("smoke_input", "")),
-                        problem_description=assignment["description"] or "",
-                        num_io=int(io_count),
-                        num_edge=int(edge_count),
-                        force_regenerate=True,
-                    )
-                st.success(
-                    f"Generated {generated.get('io_count', 0)} I/O and "
-                    f"{generated.get('edge_count', 0)} edge cases."
-                )
-                st.rerun()
-            except Exception as exc:
-                st.error(f"Test generation failed: {exc}")
 
     def edit_case_files(case_files, category: str, heading: str) -> None:
         st.markdown(f"#### {heading}")
@@ -750,7 +894,7 @@ def teacher_view() -> None:
             st.dataframe(
                 [{"Assignment": a["title"], "Problem slug": a["problem_id"],
                   "Due": a["due_date"] or "No deadline"} for a in assignments[:8]],
-                                width="stretch", hide_index=True,
+                width="stretch", hide_index=True,
             )
         else:
             st.info("Create an assignment to get started.")
@@ -926,7 +1070,7 @@ def student_view() -> None:
             st.markdown(f"### {selected['title']}")
             show_report(raw_report, selected["score"], selected["io_score"],
                         selected["quality_score"], selected["sanitizer_score"],
-                        selected["feedback_summary"],
+                        selected["feedback_summary"], include_private=False,
                         student_name=user["name"], roll_no=user["roll_no"],
                         assignment_title=selected["title"],
                         submitted_at=selected["submitted_at"],
@@ -951,8 +1095,9 @@ def student_view() -> None:
                 show_report(
                     prior_report, prior["score"], prior["io_score"],
                     prior["quality_score"], prior["sanitizer_score"],
-                    prior["feedback_summary"], student_name=user["name"],
-                    roll_no=user["roll_no"], assignment_title=assignment["title"],
+                    prior["feedback_summary"], include_private=False,
+                    student_name=user["name"], roll_no=user["roll_no"],
+                    assignment_title=assignment["title"],
                     submitted_at=prior["submitted_at"], submitted_code=prior["submitted_code"],
                 )
             return
@@ -996,7 +1141,7 @@ def student_view() -> None:
                     st.warning("Submission saved, but it did not compile. Resubmission is disabled.")
                 show_report(report, result["score"], result["io_score"],
                             result["quality_score"], result["sanitizer_score"],
-                            result["feedback_summary"],
+                            result["feedback_summary"], include_private=False,
                             student_name=user["name"], roll_no=user["roll_no"],
                             assignment_title=assignment["title"], submitted_code=source)
             except Exception as exc:
@@ -1013,9 +1158,9 @@ def student_view() -> None:
                 st.error(f"Evaluation failed. The attempt is recorded and resubmission is disabled: {exc}")
                 show_report(failure, result["score"], result["io_score"],
                             result["quality_score"], result["sanitizer_score"],
-                            result["feedback_summary"], student_name=user["name"],
-                            roll_no=user["roll_no"], assignment_title=assignment["title"],
-                            submitted_code=source)
+                            result["feedback_summary"], include_private=False,
+                            student_name=user["name"], roll_no=user["roll_no"],
+                            assignment_title=assignment["title"], submitted_code=source)
     else:
         st.markdown('<p class="portal-kicker">Account security</p>', unsafe_allow_html=True)
         st.title("Change password")
