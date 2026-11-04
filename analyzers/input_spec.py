@@ -1,12 +1,9 @@
-#!/usr/bin/env python3
 """LLM-guided stdin analysis and raw-input generation for C-Grade Engine.
-
 The model is asked to understand the complete C program and produce actual raw
 stdin text for each requested benchmark dimension.  No algorithm-specific input
 format branches or deterministic array/string serializers are used.
 """
 from __future__ import annotations
-
 import hashlib
 import json
 import math
@@ -17,20 +14,15 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Optional
-
 DEFAULT_MODEL = "qwen3.5:2b"
 DEFAULT_URL = "http://127.0.0.1:11434"
 SPEC_SCHEMA_VERSION = 21
-
-
 def sha256_file(path: str) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
-
-
 def _chat_json(messages: list[dict], model: str, base_url: str,
                timeout: float, seed: Optional[int] = None,
                num_predict: int = 4096, temperature: float = 0.35) -> dict:
@@ -77,8 +69,6 @@ def _chat_json(messages: list[dict], model: str, base_url: str,
     if not isinstance(result, dict):
         raise RuntimeError("Ollama response must be a JSON object.")
     return result
-
-
 def _c_code_without_comments(source: str) -> str:
     """Mask C comments while preserving string/character literals and offsets."""
     out = list(source)
@@ -134,8 +124,6 @@ def _c_code_without_comments(source: str) -> str:
                     out[i] = " "
                 i += 1
     return "".join(out)
-
-
 def _split_c_arguments(text: str) -> list[str]:
     """Split a C call's arguments without splitting nested expressions."""
     parts, start = [], 0
@@ -166,14 +154,10 @@ def _split_c_arguments(text: str) -> list[str]:
     if tail:
         parts.append(tail)
     return parts
-
-
 def _root_variable(expression: str) -> Optional[str]:
     expression = re.sub(r"^\s*&\s*", "", expression)
     match = re.match(r"\s*([A-Za-z_]\w*)", expression)
     return match.group(1) if match else None
-
-
 def _matching_paren_in_text(text: str, open_pos: int) -> Optional[int]:
     """Find a balanced call close while respecting C string/char literals."""
     depth, quote, i = 0, None, open_pos
@@ -195,10 +179,6 @@ def _matching_paren_in_text(text: str, open_pos: int) -> Optional[int]:
                 return i
         i += 1
     return None
-
-
-
-
 def _c_statement_end(code: str, pos: int) -> int:
     """Find the end of a simple C statement, including nested control statements."""
     while pos < len(code) and code[pos].isspace():
@@ -240,8 +220,6 @@ def _c_statement_end(code: str, pos: int) -> int:
         elif code[i] == ";" and depth == 0:
             return i + 1
     return len(code)
-
-
 def _enclosing_for_bound(code: str, position: int) -> Optional[str]:
     """Return the scalar bound of a for-loop containing a stdin read, if any."""
     for match in re.finditer(r"\bfor\s*\(", code):
@@ -264,9 +242,6 @@ def _enclosing_for_bound(code: str, position: int) -> Optional[str]:
         if bound:
             return bound.group(1)
     return None
-
-
-
 def _enclosing_for_bounds(code: str, position: int) -> list[str]:
     """Return all input-variable names used by enclosing for-loop bounds."""
     found = []
@@ -294,8 +269,6 @@ def _enclosing_for_bounds(code: str, position: int) -> list[str]:
             if name not in {"int", "long", "short", "unsigned", "size_t"}:
                 found.append((match.start(), name))
     return list(dict.fromkeys(name for _, name in sorted(found)))
-
-
 def _enclosing_repeat_count(code: str, position: int) -> str:
     """Translate enclosing loop bounds to the materializer's N/M expression."""
     loops = []
@@ -329,8 +302,6 @@ def _enclosing_repeat_count(code: str, position: int) -> str:
         number = re.search(r"\b(\d+)\s*\*", expr)
         return f"{number.group(1)}*N" if number else "N*N"
     return "N"
-
-
 def _source_main_bounds(source: str, variable: str) -> Optional[int]:
     """Infer an upper input bound from simple early-exit range guards."""
     code = _c_code_without_comments(source)
@@ -371,10 +342,8 @@ def _source_main_bounds(source: str, variable: str) -> Optional[int]:
             limits.append(raw if operator == ">" else raw - 1)
     valid = [x for x in limits if x >= 2]
     return min(valid) if valid else None
-
 def _source_stdin_reads(source: str) -> list[dict]:
     """Extract common direct-stdin destinations, including character-at-a-time reads.
-
     This is a structural safety net, not the primary input analyst. Ollama still
     describes the complete grammar and semantic constraints.
     """
@@ -412,13 +381,8 @@ def _source_stdin_reads(source: str) -> list[dict]:
         elif name in {"getchar", "getc", "fgetc"}:
             if name != "getchar" and (not args or not re.search(r"\bstdin\b", args[0])):
                 continue
-            # Find the destination in `buffer[i] = getchar()` or `c = fgetc(stdin)`.
             lhs = re.search(r"([A-Za-z_]\w*(?:\s*\[[^\]]+\])?)\s*=\s*$", code[:match.start()])
             if lhs and "[" in lhs.group(1):
-                # A direct character-buffer write (buffer[i] = getchar()).
-                # Scalar temporaries such as `c = getchar()` are deliberately
-                # left to Ollama's whole-program analysis because the actual
-                # destination may be a later assignment in a helper routine.
                 destinations = [(lhs.group(1), "c")]
         for expr, conversion in destinations:
             root = _root_variable(expr)
@@ -432,17 +396,12 @@ def _source_stdin_reads(source: str) -> list[dict]:
                               "source_offset": match.start()})
     unique: dict[str, dict] = {}
     for item in reads:
-        # Prefer an indexed character write over an earlier scalar-looking use.
         old = unique.get(item["variable"])
         if old is None or ("[" not in old.get("expression", "") and "[" in item.get("expression", "")):
             unique[item["variable"]] = item
     return sorted(unique.values(), key=lambda item: item["source_offset"])
-
-
 def _source_stdin_variables(source: str) -> set[str]:
     return {item["variable"] for item in _source_stdin_reads(source)}
-
-
 def _strip_c_initializer(declarator: str) -> str:
     """Remove a declarator initializer at top level, preserving nested '='."""
     paren = bracket = brace = 0
@@ -477,12 +436,9 @@ def _strip_c_initializer(declarator: str) -> str:
                 return declarator[:i].strip()
         i += 1
     return declarator.strip()
-
-
 def _find_c_declaration(source: str, variable: str,
                         before: Optional[int] = None) -> Optional[dict]:
     """Find a simple C declaration for *variable*, including shared declarations.
-
     Handles declarations such as ``int a, b`` and ``char *s, *t``.  The
     declarators are split with the same nesting/quote-aware routine used for
     function arguments, so commas in initializers do not create fake variables.
@@ -497,15 +453,10 @@ def _find_c_declaration(source: str, variable: str,
         r"size_t|long|short|int|char|float|double)\s*([^;{}]+);"
     )
     matches = list(type_pattern.finditer(code[:limit]))
-    # Nearest declaration wins, avoiding earlier function parameters/local names.
     for match in reversed(matches):
         base_type = re.sub(r"\s+", " ", match.group(1)).strip()
         for declarator in _split_c_arguments(match.group(2)):
-            # Remove only a top-level initializer; comparisons inside array
-            # bounds or nested initializer expressions remain untouched.
             candidate = _strip_c_initializer(declarator)
-            # Accept zero or more array dimensions, e.g. a[100], cost[16][16].
-            # Keep the first dimension in `capacity` for backward compatibility.
             dm = re.fullmatch(
                 r"\s*(\*+\s*)?" + re.escape(variable) +
                 r"\s*((?:\[\s*[^\]]*\s*\])*)\s*",
@@ -524,8 +475,6 @@ def _find_c_declaration(source: str, variable: str,
                     "declaration_offset": match.start(),
                 }
     return None
-
-
 def _infer_source_field(source: str, read: dict) -> tuple[dict, dict]:
     """Infer a conservative field/plan for a direct stdin destination."""
     variable = read["variable"]
@@ -538,7 +487,6 @@ def _infer_source_field(source: str, read: dict) -> tuple[dict, dict]:
             f"Cannot safely infer stdin field {variable!r} from its C declaration; "
             "the input analysis must describe it explicitly."
         )
-
     base_type = decl["base_type"]
     pointer, capacity = decl["pointer"], decl["capacity"]
     expr, conv = read.get("expression", variable), read.get("conversion")
@@ -552,7 +500,6 @@ def _infer_source_field(source: str, read: dict) -> tuple[dict, dict]:
     repeat_bounds = read.get("repeat_bounds") or (
         [read["repeat_count"]] if read.get("repeat_count") else []
     )
-
     if (not is_char and index_count >= 2
             and str(read.get("repeat_expression", "")).upper() in {"N*M", "M*N"}):
         shape = "matrix"
@@ -566,7 +513,6 @@ def _infer_source_field(source: str, read: dict) -> tuple[dict, dict]:
         shape = "string"
     else:
         shape = "scalar"
-
     if shape == "scalar":
         count = 1
     elif shape == "matrix":
@@ -576,7 +522,6 @@ def _infer_source_field(source: str, read: dict) -> tuple[dict, dict]:
             read.get("repeat_expression") or
             ("N*M" if len(repeat_bounds) >= 2 else "N")
         )
-
     line_mode = "one_line" if (conv in {"line", "s", "c"} and is_char and not repeated) else "tokens"
     dimensions = decl.get("dimensions") or ([capacity] if capacity is not None else [])
     declared_type = base_type + (" *" if pointer else "")
@@ -584,7 +529,6 @@ def _infer_source_field(source: str, read: dict) -> tuple[dict, dict]:
         declared_type += f"[{dimension}]"
     profile = ("text" if shape == "string" or is_char else
                ("nonnegative" if "unsigned" in base_type.lower() else "small_signed"))
-
     input_field = {
         "position": int(read.get("position", 1)), "variable": variable,
         "declared_type": declared_type, "read_function": read.get("read_function", "scanf"),
@@ -600,11 +544,8 @@ def _infer_source_field(source: str, read: dict) -> tuple[dict, dict]:
     if shape == "matrix":
         plan_field["inner_count"] = "N"
     return input_field, plan_field
-
-
 def _normalize_schema_against_source(spec: dict, source: str) -> None:
     """Reconcile Ollama's schema with visible C declarations and direct reads.
-
     Ollama remains the primary analyst. Static parsing only corrects facts that
     are visible in the source (declaration/read destination). In particular,
     an input field declared as char[]/char* cannot silently remain a one-char
@@ -615,12 +556,10 @@ def _normalize_schema_against_source(spec: dict, source: str) -> None:
     generation = analysis.setdefault("input_generation", {})
     reads = _source_stdin_reads(source)
     actual = {item["variable"] for item in reads}
-
     fields = input_info.get("fields")
     plan = generation.get("fields")
     fields = [f for f in fields if isinstance(f, dict)] if isinstance(fields, list) else []
     plan = [f for f in plan if isinstance(f, dict)] if isinstance(plan, list) else []
-
     def by_root(items):
         result = {}
         for item in items:
@@ -628,14 +567,10 @@ def _normalize_schema_against_source(spec: dict, source: str) -> None:
             if root:
                 result.setdefault(root, item)
         return result
-
     field_map, plan_map = by_root(fields), by_root(plan)
     code = _c_code_without_comments(source)
-
     def declaration_for(variable: str, before: Optional[int] = None):
         return _find_c_declaration(source, variable, before)
-
-    # First reconcile every directly recognized read.
     for read in reads:
         variable = read["variable"]
         inferred_input, inferred_plan = _infer_source_field(source, read)
@@ -653,10 +588,6 @@ def _normalize_schema_against_source(spec: dict, source: str) -> None:
                                         ("position", "variable", "shape", "element_type", "count", "line_mode")})
         if "char" in str(inferred_plan.get("element_type", "")).lower() or inferred_plan.get("shape") in {"string", "line"}:
             plan_map[variable]["value_profile"] = "text"
-
-    # Second pass: custom/helper readers may not be statically recognizable.
-    # If Ollama identified a char buffer as an input field, its storage type is
-    # enough to prevent the scalar-one-character materialization failure.
     for field in fields:
         variable = _root_variable(str(field.get("variable", "")))
         if not variable:
@@ -687,11 +618,6 @@ def _normalize_schema_against_source(spec: dict, source: str) -> None:
                                            "count": "N", "line_mode": "one_line"})
             plan_map[variable]["element_type"] = base_type
             plan_map[variable]["value_profile"] = "text"
-
-    # If every recognized stdin read is in main, treat those destinations as
-    # authoritative and discard LLM-invented locals (graph arrays, loop indices,
-    # printf, etc.). If reads occur in helper functions, preserve model-only
-    # fields because wrapper readers may return values into caller variables.
     main_match = re.search(r"\bmain\s*\([^)]*\)\s*\{", code)
     main_start = main_match.end() if main_match else -1
     main_open = code.find("{", main_match.start()) if main_match else -1
@@ -714,7 +640,6 @@ def _normalize_schema_against_source(spec: dict, source: str) -> None:
                   if _root_variable(str(item.get("variable", ""))) in actual]
         plan = [item for item in plan
                 if _root_variable(str(item.get("variable", ""))) in actual]
-
     order = {item["variable"]: item["position"] for item in reads}
     allowed_profiles = {"small_signed", "nonnegative", "positive", "sorted",
                         "binary", "distinct", "arbitrary", "text", "dimension",
@@ -730,7 +655,6 @@ def _normalize_schema_against_source(spec: dict, source: str) -> None:
                 item["value_profile"] = "positive"
             else:
                 item["value_profile"] = valid[0]
-
     for item in plan:
         variable = str(item.get("variable", ""))
         if not variable or str(item.get("shape", "scalar")).lower() not in {
@@ -744,7 +668,6 @@ def _normalize_schema_against_source(spec: dict, source: str) -> None:
             item["value_profile"] = "nonnegative"
         elif re.search(r"\b" + re.escape(variable) + r"\s*<=\s*0\b", code):
             item["value_profile"] = "positive"
-
     for collection in (fields, plan):
         for item in collection:
             root = _root_variable(str(item.get("variable", "")))
@@ -753,9 +676,6 @@ def _normalize_schema_against_source(spec: dict, source: str) -> None:
         collection.sort(key=lambda item: int(item.get("position", 0)))
     input_info["fields"] = fields
     generation["fields"] = plan
-
-    # Correct an LLM-selected local loop counter when it is not an actual
-    # stdin destination. Prefer the first source-verified scalar input.
     dimension = analysis.get("profiling_dimension", {})
     parameters = dimension.get("parameters", []) if isinstance(dimension, dict) else []
     primary = _primary_dimension_variable(dimension)
@@ -777,7 +697,6 @@ def _normalize_schema_against_source(spec: dict, source: str) -> None:
                     f"using source-verified scalar input {replacement!r}."
                 )
     primary = _primary_dimension_variable(dimension)
-
     repeated_bounds = {
         bound
         for item in reads
@@ -787,20 +706,12 @@ def _normalize_schema_against_source(spec: dict, source: str) -> None:
     for item in plan:
         if str(item.get("variable", "")) in repeated_bounds:
             item["value_profile"] = "dimension"
-
-    # Graph/adjacency inputs commonly require every endpoint to be in [0, n).
-    # Generate valid deterministic indices instead of arbitrary nonnegative
-    # values that would be rejected by the student's range checks.
     for item in plan:
         variable = str(item.get("variable", ""))
         if (variable and re.search(r"\b" + re.escape(variable) + r"\s*<\s*0\b", code)
                 and re.search(r"\b" + re.escape(variable) + r"\s*>=\s*" +
                               re.escape(primary) + r"\b", code)):
             item["value_profile"] = "valid_index"
-
-    # Preserve the requested N for ordinary size parameters and allocation
-    # dimensions. Prime mapping is reserved for source that resembles a
-    # primality test; otherwise nearby requests can collapse to the same value.
     dimension = analysis.get("profiling_dimension", {})
     parameters = dimension.get("parameters", []) if isinstance(dimension, dict) else []
     primary = _primary_dimension_variable(dimension)
@@ -817,10 +728,6 @@ def _normalize_schema_against_source(spec: dict, source: str) -> None:
             dimension["dimension_value_profile"] = "prime"
         else:
             dimension["dimension_value_profile"] = "identity"
-
-    # Avoid early-return masking for the recognizable pair-sum pattern. The
-    # deterministic values 1..N with target 2N guarantee that no distinct pair
-    # matches, exercising the complete nested-loop search.
     pair_match = re.search(
         r"\b([A-Za-z_]\w*)\s*\[\s*[A-Za-z_]\w*\s*\]\s*\+\s*"
         r"\1\s*\[\s*[A-Za-z_]\w*\s*\]\s*==\s*([A-Za-z_]\w*)", code)
@@ -839,8 +746,6 @@ def _normalize_schema_against_source(spec: dict, source: str) -> None:
             elif str(item.get("variable", "")) == pair_target:
                 item["value_profile"] = "pair_sum_no_match"
                 item.pop("fixed_value", None)
-
-
 def _schema_roots(fields: list[dict]) -> set[str]:
     roots = set()
     for field in fields:
@@ -849,8 +754,6 @@ def _schema_roots(fields: list[dict]) -> set[str]:
         if root:
             roots.add(root)
     return roots
-
-
 def _primary_dimension_variable(dimension: dict) -> str:
     """Resolve the scalar stdin variable represented by the requested N."""
     if not isinstance(dimension, dict):
@@ -868,8 +771,6 @@ def _primary_dimension_variable(dimension: dict) -> str:
                 if name:
                     return name
     return names[0] if names else ""
-
-
 def _validate(spec: dict, source: Optional[str] = None) -> None:
     if not isinstance(spec, dict):
         raise ValueError("Input specification must be a JSON object.")
@@ -892,7 +793,6 @@ def _validate(spec: dict, source: Optional[str] = None) -> None:
     plan_roots = _schema_roots(plan)
     if source:
         source_roots = _source_stdin_variables(source)
-        # Real source reads are authoritative; LLM-only locals are not required.
         missing_analysis = source_roots - input_roots
         missing_plan = source_roots - plan_roots
     else:
@@ -915,8 +815,6 @@ def _validate(spec: dict, source: Optional[str] = None) -> None:
                 "Input schema does not cover all statically visible stdin destinations: "
                 + "; ".join(details) + ". Refusing to profile incomplete inputs."
             )
-
-
 def analyze_source(source_path: str, model: str = DEFAULT_MODEL,
                    base_url: str = DEFAULT_URL, timeout: float = 120,
                    sample_input: Optional[str] = None,
@@ -938,7 +836,6 @@ def analyze_source(source_path: str, model: str = DEFAULT_MODEL,
     prompt = f'''Study this complete C program to understand its stdin format and how
 its input size can be scaled for runtime-complexity benchmarking. Do not write
 any concrete test input in this analysis response.
-
 Return JSON with exactly this general structure:
 {{
   "analysis": {{
@@ -950,7 +847,6 @@ Return JSON with exactly this general structure:
   "max_safe_dimension": null,
   "analysis_method": "LLM inspection of complete C source"
 }}
-
 Important:
 - Trace every stdin read in the exact order it is consumed, including reads in
   loops, helper functions, branches, and mixed scanf/fgets/getchar code.
@@ -997,7 +893,6 @@ Important:
   Use value_profile=dimension only for the variable that actually controls N.
 - Describe each stdin read exactly once in input order, including scalar
   dimensions before the arrays they size.
-
 {description_section}{sample_section}
 C PROGRAM (use this as the input-format authority):
 ```c
@@ -1025,11 +920,8 @@ END PROGRAM'''
         "base_url": base_url,
     }
     return spec
-
-
 def _effective_inner_count(field: dict, shape: str, n: int) -> int:
     """Resolve optional inner_count values using shape-aware safe defaults.
-
     The schema prompt permits the literal "omit" for inner_count when a shape
     does not need a second dimension. Some model responses nevertheless emit
     it for matrix/string_array fields. Preserve the intended defaults instead
@@ -1040,9 +932,9 @@ def _effective_inner_count(field: dict, shape: str, n: int) -> int:
         "omit", "omitted", "none", "null", ""
     }:
         if shape in {"matrix", "sequence2d", "2d"}:
-            return int(n)       # square matrix default
+            return int(n)
         if shape == "string_array":
-            return 8             # default width for each string
+            return 8
         raise ValueError(
             f"Input field {field.get('variable', '<unnamed>')!r} has "
             "inner_count marked omitted, but this shape requires an inner count."
@@ -1058,8 +950,6 @@ def _effective_inner_count(field: dict, shape: str, n: int) -> int:
                 "is missing its required inner_count."
             )
     return _safe_count(raw, n)
-
-
 def _safe_count(expression: Any, n: int, inner_n: Optional[int] = None) -> int:
     """Evaluate a deliberately tiny integer expression language for schema lengths."""
     import ast
@@ -1067,8 +957,6 @@ def _safe_count(expression: Any, n: int, inner_n: Optional[int] = None) -> int:
         value = expression
     elif isinstance(expression, str):
         expr = expression.strip().upper().replace("PRIMARY_N", "N")
-        # Ollama occasionally emits OMIT for an optional count field. For an
-        # array/string length, the safe default is one item per benchmark N.
         if expr.lower() in {"omit", "omitted", "none", "null", ""}:
             expr = "N"
         tree = ast.parse(expr, mode="eval")
@@ -1087,8 +975,6 @@ def _safe_count(expression: Any, n: int, inner_n: Optional[int] = None) -> int:
     if value < 0 or value > 8_000_000:
         raise ValueError(f"Input schema requested unsafe element count: {value}")
     return value
-
-
 def _value_for(element_type: str, profile: str, index: int, rng: random.Random,
                fixed_value: Any = None) -> str:
     if fixed_value is not None:
@@ -1114,10 +1000,7 @@ def _value_for(element_type: str, profile: str, index: int, rng: random.Random,
         return str(index + 1)
     if p == "sorted":
         return str(index - 10)
-    # Small signed values avoid overflow in common arithmetic programs.
     return str(((index * 17 + rng.randint(0, 7)) % 41) - 20)
-
-
 def _largest_prime_at_most(value: int) -> int:
     """Return a prime near the requested scalar dimension, without external tools."""
     candidate = max(2, int(value))
@@ -1129,23 +1012,18 @@ def _largest_prime_at_most(value: int) -> int:
             return candidate
         candidate -= 2 if candidate > 3 else 1
     return 2
-
-
 def materialize_stdin(spec: dict, n: int, seed: int = 17) -> str:
     """Expand an LLM-authored structural schema into raw stdin without asking the LLM for data."""
     _validate(spec)
     fields = spec.get("analysis", {}).get("input_generation", {}).get("fields", [])
     rng = random.Random((int(seed) << 32) ^ int(n))
-    # Non-dimension scalar parameters must not drift between benchmark sizes.
     scalar_rng = random.Random(int(seed))
     output_lines: list[str] = []
     tokens: list[str] = []
-
     def flush_tokens():
         if tokens:
             output_lines.append(" ".join(tokens))
             tokens.clear()
-
     for field in sorted(fields, key=lambda x: int(x.get("position", 0))):
         shape = str(field.get("shape", field.get("generator", {}).get("kind", "scalar"))).lower()
         etype = str(field.get("element_type", field.get("declared_type", "int")))
@@ -1201,7 +1079,6 @@ def materialize_stdin(spec: dict, n: int, seed: int = 17) -> str:
             continue
         else:
             raise ValueError(f"Unsupported input schema shape {shape!r} for {field.get('variable')!r}.")
-
         if line_mode == "one_per_item":
             flush_tokens()
             output_lines.extend(values)
@@ -1215,11 +1092,8 @@ def materialize_stdin(spec: dict, n: int, seed: int = 17) -> str:
     if len(raw.encode("utf-8")) > 8_000_000:
         raise ValueError("Materialized stdin exceeds the 8 MB safety limit.")
     return raw
-
-
 def validate_materialized_batch(spec: dict, raw_inputs: dict[int, str]) -> dict:
     """Verify that generated payloads really vary along declared N dimensions.
-
     Byte length alone is insufficient for scalar dimensions: values such as
     16, 32 and 64 all occupy two characters. This audit therefore also reads
     the primary scalar dimension token from each generated payload.
@@ -1231,15 +1105,12 @@ def validate_materialized_batch(spec: dict, raw_inputs: dict[int, str]) -> dict:
     dimension = analysis.get("profiling_dimension", {})
     parameters = dimension.get("parameters", []) if isinstance(dimension, dict) else []
     primary = _primary_dimension_variable(dimension)
-
     def depends_on_n(expression):
         if isinstance(expression, int):
             return False
         return bool(re.search(r"\b(?:N|PRIMARY_N)\b", str(expression), re.IGNORECASE))
-
     def count_for(expr, n, inner=None):
         return _safe_count(expr, n, inner)
-
     scaling, scalar_values = [], {}
     ordered = sorted(fields, key=lambda f: int(f.get("position", 0)))
     for n, raw in sorted(raw_inputs.items()):
@@ -1250,10 +1121,6 @@ def validate_materialized_batch(spec: dict, raw_inputs: dict[int, str]) -> dict:
             variable = str(field.get("variable", "<unnamed>"))
             profile = str(field.get("value_profile", "")).lower()
             if shape in {"scalar", "number", "integer", "float"}:
-                # Every scalar occupies one stdin token, whether or not it is
-                # the profiling dimension. Advance unconditionally; otherwise
-                # the audit reads the first scalar (e.g. a=0) as b when b is
-                # the second input field, falsely reporting that b never scales.
                 if variable == primary or profile == "dimension":
                     if cursor < len(tokens):
                         scalar_values.setdefault(variable, {})[int(n)] = tokens[cursor]
@@ -1283,9 +1150,7 @@ def validate_materialized_batch(spec: dict, raw_inputs: dict[int, str]) -> dict:
             elif shape in {"string", "line", "char_line"}:
                 if depends_on_n(field.get("count", "N")):
                     scaling.append(variable)
-                # A generated string is serialized as one whitespace-free token.
                 cursor += 1
-
     lengths = {int(n): len(raw.encode("utf-8")) for n, raw in raw_inputs.items()}
     scalar_dimension_values = {}
     for variable, values in scalar_values.items():
@@ -1295,7 +1160,6 @@ def validate_materialized_batch(spec: dict, raw_inputs: dict[int, str]) -> dict:
                 f"Primary scalar profiling dimension {variable!r} has the same generated value "
                 f"for every requested N: {values}. Refusing to profile an input that does not scale."
             )
-
     if scaling and len(lengths) >= 2 and len(set(lengths.values())) == 1:
         raise ValueError(
             "Generated stdin has the same byte length for every requested N, "
@@ -1316,13 +1180,10 @@ def validate_materialized_batch(spec: dict, raw_inputs: dict[int, str]) -> dict:
         "distinct_payload_lengths": len(set(lengths.values())),
         "warning": warning,
     }
-
-
 def generate_stdin_batch(spec: dict, sizes: list[int], seed: int = 17,
                          feedback: Optional[str] = None,
                          timeout: float = 120) -> dict[int, str]:
     """Materialize each requested stdin locally from the analyzed structural schema.
-
     `feedback` and `timeout` remain accepted for API compatibility; generation no
     longer sends benchmark payloads to Ollama.
     """
@@ -1333,14 +1194,11 @@ def generate_stdin_batch(spec: dict, sizes: list[int], seed: int = 17,
     generated = {n: materialize_stdin(spec, n, seed=seed) for n in requested}
     validate_materialized_batch(spec, generated)
     return generated
-
-
 def generate_stdin(spec: dict, n: int, seed: int = 17,
                    feedback: Optional[str] = None,
                    timeout: float = 120) -> str:
     """Backward-compatible single-dimension stdin materializer."""
     return materialize_stdin(spec, int(n), seed=seed)
-
 def maximum_safe_dimension(spec: dict, source: Optional[str] = None) -> Optional[int]:
     """Return the tightest declared or source-visible scalar input upper bound."""
     candidates = []
@@ -1357,8 +1215,6 @@ def maximum_safe_dimension(spec: dict, source: Optional[str] = None) -> Optional
         if inferred is not None:
             candidates.append(inferred)
     if source:
-        # Respect fixed C storage capacities for N-scaled arrays/strings.
-        # Character buffers reserve one byte for the terminating NUL.
         for field in spec.get("analysis", {}).get("input_generation", {}).get("fields", []):
             if not isinstance(field, dict):
                 continue
@@ -1388,9 +1244,6 @@ def maximum_safe_dimension(spec: dict, source: Optional[str] = None) -> Optional
                 except (TypeError, ValueError):
                     pass
     return min(candidates) if candidates else None
-
-
-
 def _static_source_spec(source_path: str, source: str, fallback_reason: str,
                         sample_input: Optional[str] = None,
                         problem_description: Optional[str] = None,
@@ -1398,7 +1251,6 @@ def _static_source_spec(source_path: str, source: str, fallback_reason: str,
                         model: str = DEFAULT_MODEL,
                         base_url: str = DEFAULT_URL) -> Optional[dict]:
     """Build a conservative input schema when Ollama is unavailable.
-
     Supports common direct stdin reads in main. It deliberately refuses helper
     readers and ambiguous source layouts rather than inventing an input grammar.
     """
@@ -1423,7 +1275,6 @@ def _static_source_spec(source_path: str, source: str, fallback_reason: str,
         main_match.end() <= item.get("source_offset", -1) < main_close for item in reads
     ):
         return None
-
     input_fields, plan = [], []
     try:
         for read in reads:
@@ -1432,7 +1283,6 @@ def _static_source_spec(source_path: str, source: str, fallback_reason: str,
             plan.append(generation)
     except (ValueError, TypeError, KeyError):
         return None
-
     actual = {item["variable"] for item in reads}
     repeated_bounds = {
         name for item in reads for name in (
@@ -1443,9 +1293,6 @@ def _static_source_spec(source_path: str, source: str, fallback_reason: str,
     for item in plan:
         if item["variable"] in repeated_bounds:
             item["value_profile"] = "dimension"
-
-    # Choose a scalar that visibly controls allocation/loop work. If there is
-    # no scalar (e.g. strings), the first variable-length input is the dimension.
     scalar_names = [
         item["variable"] for item in plan
         if item.get("shape") == "scalar" and item["variable"] in actual
@@ -1458,7 +1305,6 @@ def _static_source_spec(source_path: str, source: str, fallback_reason: str,
         ))
         return score
     primary = max(scalar_names, key=control_score) if scalar_names else plan[0]["variable"]
-
     parameters = []
     for item in plan:
         if item.get("shape") == "scalar":
@@ -1472,7 +1318,6 @@ def _static_source_spec(source_path: str, source: str, fallback_reason: str,
     if not parameters:
         parameters = [{"variable": primary, "meaning": "Source-inferred variable-length input.",
                         "scaling_rule": "Primary scaling factor"}]
-
     spec = {
         "schema_version": SPEC_SCHEMA_VERSION,
         "source_file": os.path.basename(source_path),
@@ -1520,8 +1365,6 @@ def _static_source_spec(source_path: str, source: str, fallback_reason: str,
     _validate(spec, source)
     spec["max_safe_dimension"] = maximum_safe_dimension(spec, source)
     return spec
-
-
 def load_or_analyze(source_path: str, spec_dir: Optional[str] = None,
                     model: str = DEFAULT_MODEL, base_url: str = DEFAULT_URL,
                     timeout: float = 120, force: bool = False,
@@ -1541,7 +1384,6 @@ def load_or_analyze(source_path: str, spec_dir: Optional[str] = None,
         "model": model,
         "base_url": base_url,
     }, sort_keys=True).encode("utf-8")).hexdigest()
-
     if not force and cache_path.exists():
         try:
             cached = json.loads(cache_path.read_text(encoding="utf-8"))
@@ -1554,9 +1396,7 @@ def load_or_analyze(source_path: str, spec_dir: Optional[str] = None,
                 _validate(cached, cached_source)
                 return cached, str(cache_path)
         except Exception:
-            # A stale or malformed cache is regenerated below.
             pass
-
     try:
         spec = analyze_source(
             str(src), model=model, base_url=base_url, timeout=timeout,

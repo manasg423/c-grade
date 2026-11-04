@@ -3,12 +3,10 @@ import re
 import hashlib
 
 def _strip_comments_and_whitespace(code_string):
-    """Literal normalization: only removes comments and whitespace."""
     code = re.sub(r'//.*|/\*[\s\S]*?\*/', '', code_string)
     return re.sub(r'\s+', '', code)
 
 def _normalize_structural(code_string):
-    """Structural normalization: removes comments, whitespace, and generalizes identifiers."""
     code = re.sub(r'//.*|/\*[\s\S]*?\*/', '', code_string)
     code = re.sub(r'".*?"', 'STR', code)
     code = re.sub(r'\b[a-zA-Z_]\w*\b', 'ID', code)
@@ -29,7 +27,6 @@ def _get_fingerprints(text, k=10, window_size=5):
     return fingerprints
 
 def evaluate(source_path, binary_path, params, limits):
-    # Check for the new key, fall back to the old key, or default to the file's current directory
     corpus_dir = (
         params.get('submissions_dir') 
         or params.get('corpus_dir') 
@@ -53,7 +50,7 @@ def evaluate(source_path, binary_path, params, limits):
     most_similar_file = "None"
     
     if os.path.exists(corpus_dir):
-        for root, dirs, files in os.walk(corpus_dir):
+        for root, _, files in os.walk(corpus_dir):
             for file in files:
                 if file.endswith('.c') and file != 'oracle.c':
                     corpus_path = os.path.join(root, file)
@@ -68,7 +65,6 @@ def evaluate(source_path, binary_path, params, limits):
                     corpus_fp_struct = _get_fingerprints(corpus_struct)
                     corpus_fp_lit = _get_fingerprints(corpus_lit)
                     
-                    # Structural Jaccard Math
                     if not target_fp_struct and not corpus_fp_struct:
                         sim_struct = 1.0
                     elif not target_fp_struct or not corpus_fp_struct:
@@ -78,7 +74,6 @@ def evaluate(source_path, binary_path, params, limits):
                         intersection_s = len(target_fp_struct.intersection(corpus_fp_struct))
                         sim_struct = intersection_s / union_s if union_s > 0 else 0.0
                         
-                    # Literal Jaccard Math
                     if not target_fp_lit and not corpus_fp_lit:
                         sim_lit = 1.0
                     elif not target_fp_lit or not corpus_fp_lit:
@@ -93,7 +88,6 @@ def evaluate(source_path, binary_path, params, limits):
                         best_lit_sim = sim_lit
                         most_similar_file = file
 
-    # Exact byte-for-byte matches stay 1.0; obfuscated matches are capped at 0.95
     effective_sim = 1.0 if best_lit_sim == 1.0 else min(max_struct_sim, 0.95)
     
     is_flagged = effective_sim >= threshold

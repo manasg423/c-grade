@@ -1,4 +1,3 @@
-"""SQLite persistence layer for the C-Grade student grading portal."""
 from __future__ import annotations
 
 import csv
@@ -11,7 +10,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = Path(os.environ.get("PORTAL_DB_PATH", ROOT / "portal.db"))
-# Legacy constant retained for compatibility with existing databases and UI checks.
 DEFAULT_PASSWORD_HASH = hashlib.sha256(b"123").hexdigest()
 
 
@@ -198,7 +196,6 @@ def update_assignment(assignment_id: int, title: str, description: str, due_date
 
 
 def delete_assignment(assignment_id: int) -> tuple[bool, str | None]:
-    """Atomically delete assignment and FK-cascaded submissions/reports; return its slug."""
     connection = get_connection()
     try:
         connection.execute("BEGIN IMMEDIATE")

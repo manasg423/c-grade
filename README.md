@@ -104,7 +104,7 @@ Not every analyzer is guaranteed to produce a conclusive result for every progra
 | Runtime profiling | Valgrind / Callgrind |
 | AI-assisted features | Ollama with `qwen3.5:2b` by default |
 | Database | SQLite |
-| Report generation | JSON, text, and PDF support through ReportLab |
+| Report generation | JSON and text output |
 | Python environment | `venv` and `pip` |
 
 ## Project Structure
@@ -126,7 +126,6 @@ c-grade-main/
 │
 ├── core/                      # Grading pipeline, sandbox and reporting
 │   ├── first_pass.py
-│   ├── pdf_reports.py
 │   ├── portal_rules.py
 │   ├── reporter.py
 │   └── sandbox.py
@@ -610,4 +609,4 @@ No license file is currently included in this repository. Until a license is add
 
 ## Acknowledgements
 
-C-Grade Engine is built with the support of the open-source tools and libraries listed in the Technology Stack section, including Python, Streamlit, GCC, Cppcheck, Valgrind, Lizard, SQLite, ReportLab, and Ollama.
+C-Grade Engine is built with the support of the open-source tools and libraries listed in the Technology Stack section, including Python, Streamlit, GCC, Cppcheck, Valgrind, Lizard, SQLite, and Ollama.

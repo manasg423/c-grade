@@ -1,32 +1,15 @@
-"""
-analyzers/edge_case_runner.py
------------------------------
-Adversarial edge-case analyzer for C-Grade Engine.
-
-Evaluates student binary against pre-generated boundary test cases
-(.in / .out pairs) located in tests/<problem>/edge_cases/.
-
-Test cases are generated ahead of time by test_case_generator.py.
-This analyzer focuses purely on execution, timeout control, boundary safety,
-and detecting corner-case bugs (e.g., overflow, zero, negative inputs).
-"""
-
 from __future__ import annotations
 
 import glob
 import os
 import subprocess
-from pathlib import Path
-from typing import Any, Optional
 
 
 def _normalize_tokens(text: str) -> list[str]:
-    """Tokenize by whitespace for robust whitespace-independent comparison."""
     return text.strip().split()
 
 
 def _run_binary_safe(binary_path: str, stdin_data: str, timeout_s: float = 1.0) -> dict:
-    """Executes student binary with timeout protection."""
     try:
         proc = subprocess.run(
             [binary_path],
@@ -61,7 +44,6 @@ def _run_binary_safe(binary_path: str, stdin_data: str, timeout_s: float = 1.0) 
 
 
 def _discover_edge_cases(testset_dir: str) -> list[dict]:
-    """Finds all edge_*.in files with corresponding .out files."""
     edge_dir = os.path.join(testset_dir, "edge_cases")
     if not os.path.isdir(edge_dir):
         edge_dir = testset_dir
@@ -80,7 +62,6 @@ def _discover_edge_cases(testset_dir: str) -> list[dict]:
 
 
 def _diagnose_failure(in_content: str, run_res: dict) -> str:
-    """Provides human-readable diagnostic on why edge case failed."""
     if run_res["timed_out"]:
         return "Timed out on boundary input (infinite loop suspected)"
     if run_res["returncode"] != 0:
@@ -88,8 +69,6 @@ def _diagnose_failure(in_content: str, run_res: dict) -> str:
             return "Runtime error: signed integer overflow"
         return f"Process crashed with returncode {run_res['returncode']}"
 
-    # Analyze input characteristics
-    inp_lower = in_content.lower()
     if "2147483647" in in_content or "-2147483648" in in_content:
         return "Integer overflow: 32-bit limits exceeded (use wider type like long long)"
     if "0" in in_content.split():
@@ -108,10 +87,6 @@ def evaluate(
     params: dict,
     limits: dict = None,
 ) -> dict:
-    """
-    Standard evaluate() entry-point.
-    Returns: score, evidence, feedback.
-    """
     params = params or {}
     limits = limits or {}
 
@@ -158,7 +133,6 @@ def evaluate(
         run_res = _run_binary_safe(binary_path, in_content, timeout_s=timeout_s)
         got_stdout = run_res["stdout"]
 
-        # Check match
         tokens_got = _normalize_tokens(got_stdout)
         tokens_exp = _normalize_tokens(expected_content)
 
