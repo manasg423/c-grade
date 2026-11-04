@@ -1,22 +1,3 @@
-"""
-agent.py  —  C-Grade Main Orchestrator
-=======================================
-CLI entry-point that runs the full grading pipeline unattended:
-
-  python agent.py --source <file.c> --rules <rules.json>
-
-The agent:
-  1. Reads and validates the rules JSON (weights must sum to 1.00).
-  2. Runs the Phase-1 Gatekeeper (compile, static-sanity, smoke-test).
-  3. Dispatches all configured specialist analyzers in parallel via
-     ThreadPoolExecutor, forwarding source, binary, params, and limits.
-  4. Collates results and calls core.reporter.generate_report() to write
-     both a machine-readable JSON report and a human-readable .txt report.
-  5. Prints a clean summary to stdout.
-
-Contract: same submission + same rules = same grade.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -27,19 +8,14 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# Ensure project root is importable regardless of cwd
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
 from core.first_pass import run_first_pass
 from core.reporter import generate_report
 
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-MAX_WORKERS = 9          # Max parallel analyzer threads
-EXECUTION_ANALYZERS = {  # These need a valid binary; skip on smoke-test fail
+MAX_WORKERS = 9
+EXECUTION_ANALYZERS = {
     "io_tests",
     "edge_case_runner",
     "sanitizer_run",
@@ -47,12 +23,7 @@ EXECUTION_ANALYZERS = {  # These need a valid binary; skip on smoke-test fail
 }
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 def _load_rules(rules_path: str) -> dict:
-    """Load rules JSON; raise ValueError if weights don't sum to ~1.00."""
     if not os.path.exists(rules_path):
         raise FileNotFoundError(f"Rules file not found: {rules_path}")
 
@@ -75,15 +46,7 @@ def _run_single_analyzer(
     params: dict,
     limits: dict,
 ) -> tuple[str, dict]:
-    """
-    Load and call analyzers.<name>.evaluate(…) safely.
-    Returns (analyzer_name, result_dict).
-    The result always has keys: score, evidence, feedback.
-    """
     try:
-        # Import once and let Python's module cache provide a stable module
-        # object. Reloading analyzers inside concurrent grading threads can
-        # leave imported dependencies stale and creates race conditions.
         mod = __import__(f"analyzers.{analyzer_name}", fromlist=["evaluate"])
         eval_fn = getattr(mod, "evaluate", None)
 
@@ -94,7 +57,6 @@ def _run_single_analyzer(
                 "feedback": f"{analyzer_name}: missing evaluate().",
             }
 
-        # Support analyzers with varying signatures
         sig        = inspect.signature(eval_fn)
         num_params = len(sig.parameters)
 
@@ -109,9 +71,6 @@ def _run_single_analyzer(
 
         if isinstance(res, dict):
             evidence = res.get("evidence", res)
-            # Normalize the complexity-fit schema at the orchestration
-            # boundary. Older cached/imported fitter versions used `family`,
-            # while current code uses `generic_family` (or both).
             if analyzer_name == "complexity_estimator" and isinstance(evidence, dict):
                 fit = evidence.get("fit")
                 if isinstance(fit, dict):
@@ -145,12 +104,7 @@ def _dispatch_analyzers(
     limits: dict,
     skip_execution: bool = False,
 ) -> dict[str, dict]:
-    """
-    Run all enabled analyzers in parallel.
-    If skip_execution=True, execution-based analyzers are replaced with a
-    placeholder (0 score) so source-only analyzers still run.
-    """
-    futures = {}
+    futures = []
     results: dict[str, dict] = {}
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
@@ -170,7 +124,7 @@ def _dispatch_analyzers(
                 _run_single_analyzer,
                 a_name, source_path, binary_path, params, limits,
             )
-            futures[future] = a_name
+            futures.append(future)
 
         for future in as_completed(futures):
             name, result = future.result()
@@ -180,7 +134,6 @@ def _dispatch_analyzers(
 
 
 def _print_summary(report: dict) -> None:
-    """Pretty-print a concise grading summary to stdout."""
     grade   = report["grade"]
     letter  = report["letter_grade"]
     sub     = report["submission"]
@@ -216,31 +169,13 @@ def _print_summary(report: dict) -> None:
     print()
 
 
-# ---------------------------------------------------------------------------
-# Public grading function (called by both CLI and ui.py)
-# ---------------------------------------------------------------------------
-
 def grade(
     source_path: str,
     rules_path: str,
     verbose: bool = False,
 ) -> dict:
-    """
-    Run the full C-Grade pipeline and return the finished report dict.
-
-    Parameters
-    ----------
-    source_path : path to the student's .c file
-    rules_path  : path to the rules JSON file
-    verbose     : if True, print per-analyzer status lines
-
-    Returns
-    -------
-    The report dict produced by core.reporter.generate_report().
-    """
     t0 = time.time()
 
-    # 1. Load rules
     rules      = _load_rules(rules_path)
     problem_id = rules.get("problem", os.path.splitext(os.path.basename(rules_path))[0])
     metrics    = rules.get("metrics", [])
@@ -253,7 +188,6 @@ def grade(
     if verbose:
         print(f"[agent] Rules loaded: {rules_path}  (problem={problem_id})")
 
-    # 2. Phase-1 Gatekeeper
     if verbose:
         print("[agent] Running Phase-1 Gatekeeper …")
 
@@ -269,7 +203,6 @@ def grade(
             f"loop={fp_result.get('suspected_infinite_loop', False)}"
         )
 
-    # If the file can't even compile, skip all analyzers
     if not compiled:
         report = generate_report(
             source_path, problem_id, rules, fp_result, {}
@@ -279,7 +212,6 @@ def grade(
         _print_summary(report)
         return report
 
-    # 3. Dispatch analyzers in parallel
     skip_exec = not smoke_ok
     if verbose:
         exec_note = " (execution-based analyzers skipped)" if skip_exec else ""
@@ -293,7 +225,6 @@ def grade(
         for name, res in analyzer_results.items():
             print(f"  [{name}]  score={res['score']:.2f}  {res['feedback'][:60]}")
 
-    # 4. Generate and persist report
     report = generate_report(
         source_path, problem_id, rules, fp_result, analyzer_results
     )
@@ -305,10 +236,6 @@ def grade(
     _print_summary(report)
     return report
 
-
-# ---------------------------------------------------------------------------
-# CLI entry-point
-# ---------------------------------------------------------------------------
 
 def main() -> None:
     parser = argparse.ArgumentParser(

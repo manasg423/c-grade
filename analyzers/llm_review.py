@@ -7,10 +7,6 @@ import requests
 from typing import Any
 
 
-# ---------------------------------------------------------------------------
-# Heuristic Fallback with Professional English Feedback
-# ---------------------------------------------------------------------------
-
 def _heuristic_readability_fallback(code: str, failure_reason: str = "") -> dict[str, Any]:
     lines = code.splitlines()
     non_empty = [l for l in lines if l.strip()]
@@ -46,7 +42,6 @@ def _heuristic_readability_fallback(code: str, failure_reason: str = "") -> dict
     strengths: list[str] = []
     improvements: list[str] = []
 
-    # Documentation assessment
     if not has_comments:
         score -= 1.5
         improvements.append(
@@ -57,7 +52,6 @@ def _heuristic_readability_fallback(code: str, failure_reason: str = "") -> dict
             "Documentation: Appropriate comments and explanatory annotations are present."
         )
 
-    # Identifier naming assessment
     if cryptic_vars:
         score -= 1.5
         var_list = ", ".join(f"'{v}'" for v in sorted(cryptic_vars))
@@ -69,7 +63,6 @@ def _heuristic_readability_fallback(code: str, failure_reason: str = "") -> dict
             "Identifier Naming: Variable and function identifiers follow descriptive naming standards."
         )
 
-    # Formatting assessment
     if indent_ratio < 0.3:
         score -= 1.5
         improvements.append(
@@ -116,10 +109,6 @@ def _heuristic_readability_fallback(code: str, failure_reason: str = "") -> dict
     }
 
 
-# ---------------------------------------------------------------------------
-# Helper: Extract Valid JSON Object
-# ---------------------------------------------------------------------------
-
 def _extract_json(raw_text: str) -> dict[str, Any] | None:
     cleaned = raw_text.strip()
 
@@ -154,10 +143,6 @@ def _extract_json(raw_text: str) -> dict[str, Any] | None:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Main Analyzer Entry Point
-# ---------------------------------------------------------------------------
-
 def evaluate(
     source_path: str,
     binary_path: str = "",
@@ -166,7 +151,6 @@ def evaluate(
 ) -> dict[str, Any]:
 
     params = params or {}
-    limits = limits or {}
 
     model = str(params.get("model", "qwen3.5:2b"))
     temperature = float(params.get("temperature", 0.1))
@@ -183,10 +167,6 @@ def evaluate(
 
     with open(source_path, "r", encoding="utf-8", errors="ignore") as f:
         code_str = f.read()
-
-    # -----------------------------------------------------------------------
-    # Strict Professional Readability Evaluation Prompt
-    # -----------------------------------------------------------------------
 
     system_prompt = (
         "You are an objective C code readability evaluator. "
@@ -258,7 +238,6 @@ def evaluate(
             }
         }
 
-        # Ollama API Request
         res = requests.post(
             "http://127.0.0.1:11434/api/generate",
             json=payload,
@@ -292,7 +271,6 @@ def evaluate(
             formatting = float(parsed.get("formatting", 7.0))
             comments = float(parsed.get("comments", 5.0))
 
-            # Weighted scoring: Formatting 40%, Naming 40%, Comments 20%
             weighted = (
                 formatting * 0.40
                 + naming * 0.40
@@ -307,23 +285,13 @@ def evaluate(
                 "Readability evaluation completed."
             )
 
-            strengths = parsed.get("strengths", [])
-            suggestions = parsed.get("suggestions", [])
-
-            # Professional feedback presentation
-            feedback_sections = [
-                f"Summary: {summary}"
-            ]
-
-            formatted_feedback = "\n\n".join(feedback_sections)
-
             return {
                 "score": normalized_score,
                 "evidence": {
                     "model": model,
                     "raw_response": parsed
                 },
-                "feedback": formatted_feedback
+                "feedback": f"Summary: {summary}"
             }
 
         else:
@@ -332,7 +300,6 @@ def evaluate(
     except Exception as exc:
         llm_err_msg = f"{type(exc).__name__}: {str(exc)}"
 
-    # Heuristic fallback
     return _heuristic_readability_fallback(
         code_str,
         failure_reason=llm_err_msg

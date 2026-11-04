@@ -1,43 +1,12 @@
-"""
-test_case_generator.py
------------------------
-Universal, completely LLM-generated blackbox test case generator for C-Grade Engine.
-
-Design Principles:
-  1. Completely LLM Generated:
-     Uses local Ollama (/api/chat with think: False) to analyze ANY teacher reference C code (oracle.c),
-     sample input, and problem description.
-     The LLM identifies:
-       - The exact standard input/output layout (lines, tokens, delimiters, types).
-       - The core algorithm, invariants, preconditions, and return expectations.
-     The LLM synthesizes:
-       - 'io_tests': typical, diverse, non-trivial inputs satisfying problem requirements.
-       - 'edge_cases': boundary, corner, adversarial inputs (minimal sizes, identical elements, negatives, limits).
-     Zero problem-specific hardcoding. Completely blackbox and universal for any C problem in the world.
-
-  2. Pure Ground-Truth Blackbox Execution:
-     Compiles the teacher's reference implementation (oracle.c) to a native executable binary.
-     Pipes each generated input to stdin and captures stdout to produce matching .out files.
-
-Output Structure:
-  problems/<problem>/tests/auto_generated/gen_X.in  &  gen_X.out
-  problems/<problem>/tests/edge_cases/edge_XX.in    &  edge_XX.out
-
-Public API:
-  generate_all_test_cases(problem_id, tests_dir=None, oracle_path=None, sample_input=None, num_io=5, num_edge=5) -> dict
-"""
-
 from __future__ import annotations
 
 import argparse
 import json
 import os
 import random
-import re
 import shutil
 import subprocess
 import tempfile
-import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Optional
@@ -47,12 +16,7 @@ OLLAMA_CHAT_URL = "http://127.0.0.1:11434/api/chat"
 DEFAULT_MODEL = "qwen3.5:2b"
 
 
-# ---------------------------------------------------------------------------
-# Blackbox Oracle Compilation & Execution
-# ---------------------------------------------------------------------------
-
 def compile_oracle(oracle_path: str, output_bin: str) -> Optional[str]:
-    """Compiles oracle.c into an executable binary using gcc or clang."""
     if not os.path.isfile(oracle_path):
         return None
 
@@ -78,7 +42,6 @@ def compile_oracle(oracle_path: str, output_bin: str) -> Optional[str]:
 
 
 def run_oracle(oracle_bin: str, stdin_text: str, timeout: float = 2.0) -> str:
-    """Executes compiled oracle binary on stdin_text and returns stdout string."""
     try:
         proc = subprocess.run(
             [oracle_bin],
@@ -92,10 +55,6 @@ def run_oracle(oracle_bin: str, stdin_text: str, timeout: float = 2.0) -> str:
         return ""
 
 
-# ---------------------------------------------------------------------------
-# LLM Chat Query Helper
-# ---------------------------------------------------------------------------
-
 def query_ollama_chat(
     messages: list[dict],
     model: str = DEFAULT_MODEL,
@@ -104,10 +63,6 @@ def query_ollama_chat(
     timeout: float = 90.0,
     seed: Optional[int] = None,
 ) -> Optional[dict]:
-    """
-    Sends chat prompt to local Ollama server using /api/chat with think: False.
-    Fast (20-30s), avoids context length exhaustion from hidden thinking tokens.
-    """
     if seed is None:
         seed = random.randint(1, 1000000)
 
@@ -140,10 +95,6 @@ def query_ollama_chat(
         return None
 
 
-# ---------------------------------------------------------------------------
-# Completely LLM-Generated Test Suite Synthesis
-# ---------------------------------------------------------------------------
-
 def generate_tests_with_llm(
     problem_id: str,
     oracle_code: str,
@@ -154,10 +105,6 @@ def generate_tests_with_llm(
     model: str = DEFAULT_MODEL,
     sample_output: Optional[str] = None,
 ) -> dict:
-    """
-    Autonomous LLM test case generator.
-    Completely blackbox and problem-independent.
-    """
     system_prompt = (
         "You are an expert autonomous software testing agent for C programming assignments. "
         "Your task is to analyze a reference C implementation (oracle.c), an optional problem description, "
@@ -298,12 +245,6 @@ def generate_tests_with_llm(
 
 
 def _ensure_multiline_format(inp_str: str, sample_input: Optional[str]) -> str:
-    """
-    Validates and normalizes LLM-generated input text.
-    If Line 1 contains a size N and Line 2 contains an array, guarantees
-    that N matches the actual number of elements supplied on Line 2, preventing
-    scanf from reading uninitialized memory.
-    """
     if not inp_str:
         return "\n"
 
@@ -334,15 +275,7 @@ def _ensure_multiline_format(inp_str: str, sample_input: Optional[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
-# ---------------------------------------------------------------------------
-# Emergency Structural Fuzzer (Only if LLM server is unreachable)
-# ---------------------------------------------------------------------------
-
 def emergency_fallback_tests(sample_input: Optional[str], num_io: int, num_edge: int) -> dict:
-    """
-    Universal structural mutation of the teacher's sample input
-    used strictly if Ollama is unreachable.
-    """
     rng = random.Random(42)
     io_cases = []
     edge_cases = []
@@ -375,10 +308,6 @@ def emergency_fallback_tests(sample_input: Optional[str], num_io: int, num_edge:
     }
 
 
-# ---------------------------------------------------------------------------
-# Main Orchestration: File Writing & Blackbox Execution
-# ---------------------------------------------------------------------------
-
 def generate_all_test_cases(
     problem_id: str,
     tests_dir: Optional[str] = None,
@@ -390,12 +319,6 @@ def generate_all_test_cases(
     force_regenerate: bool = True,
     sample_output: Optional[str] = None,
 ) -> dict:
-    """
-    Universal test case generator.
-    Writes:
-      problems/<problem>/tests/auto_generated/gen_X.in  &  gen_X.out
-      problems/<problem>/tests/edge_cases/edge_XX.in    &  edge_XX.out
-    """
     if not tests_dir:
         tests_dir = os.path.join("problems", problem_id, "tests")
     if not oracle_path:
@@ -407,13 +330,11 @@ def generate_all_test_cases(
     os.makedirs(auto_dir, exist_ok=True)
     os.makedirs(edge_dir, exist_ok=True)
 
-    # 1. Read Oracle Code
     oracle_code = ""
     if os.path.isfile(oracle_path):
         with open(oracle_path, "r", encoding="utf-8", errors="ignore") as f:
             oracle_code = f.read()
 
-    # Fill missing sample values from the assignment rules.
     if not sample_input or sample_output is None:
         rules_file = os.path.join("problems", problem_id, f"{problem_id}_rules.json")
         if os.path.isfile(rules_file):
@@ -427,7 +348,6 @@ def generate_all_test_cases(
             except Exception:
                 pass
 
-    # 2. Compile Reference Oracle Binary
     oracle_bin = None
     temp_dir = tempfile.mkdtemp(prefix="cg_oracle_")
     try:
@@ -436,7 +356,6 @@ def generate_all_test_cases(
         if compiled_path and os.path.isfile(compiled_path):
             oracle_bin = compiled_path
 
-        # 3. Generate Inputs with LLM
         test_data = generate_tests_with_llm(
             problem_id=problem_id,
             oracle_code=oracle_code,
@@ -450,7 +369,6 @@ def generate_all_test_cases(
 
         method = f"ollama-{DEFAULT_MODEL}"
 
-        # If LLM returned empty, use emergency structural mutation
         if not test_data.get("io_tests"):
             test_data = emergency_fallback_tests(sample_input, num_io, num_edge)
             method = "sample-input-fuzzer"
@@ -458,7 +376,6 @@ def generate_all_test_cases(
         io_inputs = test_data.get("io_tests", [])[:num_io]
         edge_inputs = test_data.get("edge_cases", [])[:num_edge]
 
-        # 4. Clean existing generated files if force_regenerate
         if force_regenerate:
             for d in [auto_dir, edge_dir]:
                 for f in Path(d).glob("*.in"):
@@ -475,7 +392,6 @@ def generate_all_test_cases(
         generated_io_files = []
         generated_edge_files = []
 
-        # 5. Write I/O Test Cases (.in and matching .out)
         for idx, inp in enumerate(io_inputs, 1):
             in_file = os.path.join(auto_dir, f"gen_{idx:02d}.in")
             out_file = os.path.join(auto_dir, f"gen_{idx:02d}.out")
@@ -501,7 +417,6 @@ def generate_all_test_cases(
                 "files": [f[0] for f in generated_io_files]
             }, mf, indent=2)
 
-        # 6. Write Edge Cases (.in and matching .out)
         for idx, inp in enumerate(edge_inputs, 1):
             in_file = os.path.join(edge_dir, f"edge_{idx:02d}.in")
             out_file = os.path.join(edge_dir, f"edge_{idx:02d}.out")
@@ -548,10 +463,6 @@ def generate_all_test_cases(
         except Exception:
             pass
 
-
-# ---------------------------------------------------------------------------
-# CLI Command Line Interface
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Universal Blackbox C-Grade Test Case Generator")

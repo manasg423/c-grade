@@ -1,17 +1,15 @@
 import subprocess
 import sys
 
-# 'resource' is a POSIX-only module; on Windows we skip memory-limit enforcement.
 try:
     import resource as _resource
     _HAS_RESOURCE = True
 except ImportError:
-    _resource = None       # type: ignore[assignment]
+    _resource = None  # type: ignore[assignment]
     _HAS_RESOURCE = False
 
 
 def _set_limits(memory_mb: int | None):
-    """Restricts the memory of the running process so it cannot crash the system."""
     if not _HAS_RESOURCE or memory_mb is None or memory_mb <= 0:
         return
     bytes_limit = memory_mb * 1024 * 1024
@@ -22,11 +20,6 @@ def _set_limits(memory_mb: int | None):
 
 
 def run_safe(cmd: list, stdin_data: str = "", timeout_s: float = 1.0, memory_mb: int | None = 64) -> dict:
-    """
-    Runs a binary/command safely under timeout and memory caps.
-    Returns: stdout, stderr, returncode, timed_out, error
-    """
-    # preexec_fn is only available on POSIX; skip on Windows
     preexec = (lambda: _set_limits(memory_mb)) if sys.platform != "win32" else None
 
     try:

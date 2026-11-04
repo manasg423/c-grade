@@ -1,32 +1,15 @@
-"""
-analyzers/io_tests.py
----------------------
-Standard I/O correctness analyzer for C-Grade Engine.
-
-Evaluates student binary against pre-generated test cases (.in / .out pairs)
-located in tests/<problem>/ and tests/<problem>/auto_generated/.
-
-Test cases are generated ahead of time by test_case_generator.py.
-This analyzer focuses purely on execution, timeout control, and diffing.
-"""
-
 from __future__ import annotations
 
 import glob
 import os
 import subprocess
-import time
-from pathlib import Path
-from typing import Any, Optional
 
 
 def _normalize_tokens(text: str) -> list[str]:
-    """Tokenize by whitespace for robust whitespace-independent comparison."""
     return text.strip().split()
 
 
 def _run_binary_safe(binary_path: str, stdin_data: str, timeout_s: float = 1.0) -> dict:
-    """Executes student binary with timeout protection."""
     try:
         proc = subprocess.run(
             [binary_path],
@@ -61,7 +44,6 @@ def _run_binary_safe(binary_path: str, stdin_data: str, timeout_s: float = 1.0) 
 
 
 def _discover_test_cases(testset_dir: str) -> list[dict]:
-    """Finds all .in files with corresponding .out files."""
     cases = []
     seen_stems = set()
 
@@ -90,10 +72,6 @@ def evaluate(
     params: dict,
     limits: dict = None,
 ) -> dict:
-    """
-    Standard evaluate() entry-point.
-    Returns: score, evidence, feedback.
-    """
     params = params or {}
     limits = limits or {}
 
@@ -140,7 +118,6 @@ def evaluate(
         run_res = _run_binary_safe(binary_path, in_content, timeout_s=timeout_s)
         got_stdout = run_res["stdout"]
 
-        # Check match
         tokens_got = _normalize_tokens(got_stdout)
         tokens_exp = _normalize_tokens(expected_content)
 
@@ -159,7 +136,6 @@ def evaluate(
         if is_match:
             passed += 1
         else:
-            note = ""
             if run_res["timed_out"]:
                 note = f"Timed out after {timeout_s}s (potential infinite loop)"
             elif run_res["returncode"] != 0:
