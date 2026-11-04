@@ -3,7 +3,7 @@ __pycache__/
 *.pyc
 *.o
 .DS_Store
-# problems/
+problems/
 reports/
 tests/
 rules/
@@ -13,9 +13,9 @@ analyzer_test_runs/
 .tmp/
 venv/
 .env
-# portal.db
-# portal.db-shm
-# portal.db-wal
+portal.db
+portal.db-shm
+portal.db-wal
 .github/
 .streamlit/
 analyzers/complexity_test_app.py

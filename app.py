@@ -235,32 +235,73 @@ def build_text_grading_report(
         for extra in wrapped_fb[1:]:
             lines.append(f"{indent}{extra}")
 
-    failures = report.get("failures", [])
-    if not failures:
-        for m in metrics:
-            ev = m.get("evidence", {})
-            if isinstance(ev, dict):
-                if ev.get("failures") and isinstance(ev["failures"], list):
-                    failures.extend(ev["failures"])
-                elif ev.get("failed_cases") and isinstance(ev["failed_cases"], list):
-                    failures.extend(ev["failed_cases"])
+    test_failure = None
+    for analyzer_name, record_keys in (
+        ("io_tests", ("executed_tests", "cases")),
+        ("edge_case_runner", ("cases", "executed_tests")),
+    ):
+        for metric in metrics:
+            if metric.get("analyzer") != analyzer_name:
+                continue
+            evidence = metric.get("evidence", {})
+            if not isinstance(evidence, dict):
+                continue
+            failures = evidence.get("failing") or evidence.get("failed_cases") or []
+            if not failures:
+                for record_key in record_keys:
+                    records = evidence.get(record_key, [])
+                    failures = [
+                        item for item in records
+                        if isinstance(item, dict) and item.get("status") == "FAILED"
+                    ]
+                    if failures:
+                        break
+            if failures:
+                test_failure = failures[0]
+                break
+        if test_failure:
+            break
 
-    if failures:
+    if test_failure:
+        test_id = str(
+            test_failure.get("test_file", test_failure.get("case", test_failure.get("test", "Test")))
+        ).strip()
+        test_number = re.search(r"(\d+)$", test_id)
+        display_test = f"Test {int(test_number.group(1)):02d}" if test_number else test_id
+        inp = str(test_failure.get("input", "")).replace("\n", " ").strip()
+        exp = str(test_failure.get("expected", "")).replace("\n", " ").strip()
+        got = str(test_failure.get("note", test_failure.get("got", ""))).replace("\n", " ").strip()
         lines.append("--- Where you failed ---")
-        for f in failures:
-            if isinstance(f, dict):
-                tid = str(f.get("test", f.get("label", f.get("id", "Test")))).strip()
-                inp = str(f.get("input", "")).replace("\n", " ").strip()
-                exp = str(f.get("expected", "")).replace("\n", " ").strip()
-                got = str(f.get("got", f.get("actual", f.get("output", "")))).replace("\n", " ").strip()
-                why = str(f.get("why", f.get("reason", f.get("hint", "")))).strip()
-                lines.append(f"{tid:<8} INPUT:    {inp}")
-                lines.append(f"         EXPECTED: {exp}")
-                lines.append(f"         GOT:      {got}")
-                if why:
-                    lines.append(f"         WHY:      {why}")
-            else:
-                lines.append(str(f))
+        lines.append(display_test)
+        lines.append(f"INPUT: {inp}")
+        lines.append(f"EXPECTED: {exp}")
+        lines.append(f"GOT: {got}")
+    else:
+        failures = report.get("failures", [])
+        if not failures:
+            for metric in metrics:
+                evidence = metric.get("evidence", {})
+                if isinstance(evidence, dict):
+                    failures = evidence.get("failures") or evidence.get("failed_cases") or []
+                    if failures:
+                        break
+
+    if not test_failure and failures:
+        lines.append("--- Where you failed ---")
+        failure = failures[0]
+        if isinstance(failure, dict):
+            tid = str(failure.get("test", failure.get("label", failure.get("id", "Test")))).strip()
+            inp = str(failure.get("input", "")).replace("\n", " ").strip()
+            exp = str(failure.get("expected", "")).replace("\n", " ").strip()
+            got = str(failure.get("got", failure.get("actual", failure.get("output", "")))).replace("\n", " ").strip()
+            why = str(failure.get("why", failure.get("reason", failure.get("hint", "")))).strip()
+            lines.append(f"{tid:<8} INPUT:    {inp}")
+            lines.append(f"         EXPECTED: {exp}")
+            lines.append(f"         GOT:      {got}")
+            if why:
+                lines.append(f"         WHY:      {why}")
+        else:
+            lines.append(str(failure))
 
     suggestions = report.get("suggestions", [])
     if suggestions:
