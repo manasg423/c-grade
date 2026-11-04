@@ -1,54 +1,37 @@
 """Confidence-aware generic complexity fitting for C-Grade Engine.
-
 Public API and result keys are kept compatible with the previous fitter.
 The fitter compares fixed-cost-plus-growth models in log space, reports
 ambiguity instead of forcing a winner, and exposes growth diagnostics that
 can guide additional profiling.
 """
 from __future__ import annotations
-
 import math
 import statistics
-
 EPS = 1e-12
-
-
 def _models():
     """Return (family, label, log_basis) candidates with numerically stable bases."""
     models = [("Constant", "O(1)", lambda n: 0.0)]
     models.append(("Logarithmic", "O(log N)", lambda n: math.log(math.log(max(2.0, n)))))
-
-    # Integer polynomial powers are the primary interpretable family.
     for k in range(1, 9):
         models.append(("Polynomial", "O(N)" if k == 1 else f"O(N^{k})",
                        lambda n, k=k: k * math.log(n)))
-
-    # Retain fractional powers as diagnostic candidates; do not prefer them
-    # over a nearby integer class unless the evidence clearly supports them.
     for k in (0.5, 1.5, 2.5, 3.5, 4.5, 5.5):
         models.append(("Polynomial", f"O(N^{k:g})",
                        lambda n, k=k: k * math.log(n)))
-
-    # O(N^k log^p N), including log-only (k=0), for several generic powers.
     for k in range(0, 7):
         for p in (1, 2, 3):
             if k == 0 and p == 1:
-                continue  # already represented by O(log N)
+                continue
             label = (f"O((log N)^{p})" if k == 0 else
                      (f"O(N^{k} log N)" if p == 1 else f"O(N^{k} (log N)^{p})"))
             models.append(("Polynomial-logarithmic", label,
                            lambda n, k=k, p=p: k * math.log(n) + p * math.log(math.log(max(2.0, n)))))
-
     for c in (1.5, 1.61803398875, 2.0, 3.0, 4.0, 5.0):
         models.append(("Exponential", f"O({c:g}^N)",
                        lambda n, c=c: n * math.log(c)))
         for k in (1, 2):
             models.append(("Exponential-polynomial", f"O(N^{k} * {c:g}^N)",
                            lambda n, c=c, k=k: k * math.log(n) + n * math.log(c)))
-
-    # Log-log growth is not part of the main polynomial-log family, but it is
-    # a common real benchmark shape (for example nested doubling loops). Keep
-    # a small explicit family so it is not forced into O(N) or O(N log N).
     for k in range(0, 4):
         label = "O(log log N)" if k == 0 else (
             "O(N log log N)" if k == 1 else f"O(N^{k} log log N)"
@@ -56,18 +39,13 @@ def _models():
         models.append(("Polynomial-log-log", label,
                        lambda n, k=k: k * math.log(n) +
                        math.log(max(EPS, math.log(math.log(max(4.0, n)))))))
-
-    # Factorial and polynomial-factorial families, evaluated via lgamma.
     models.append(("Factorial", "O(N!)", lambda n: math.lgamma(n + 1.0)))
     for k in (1, 2):
         models.append(("Factorial-polynomial", f"O(N^{k} * N!)",
                        lambda n, k=k: k * math.log(n) + math.lgamma(n + 1.0)))
     return models
-
-
 def _fit(ns, ys, log_basis):
     """Fit y = A + B*f(n), A,B >= 0, minimizing log-space residuals.
-
     Searching A on a bounded deterministic grid avoids the old mismatch where
     coefficients were estimated in ordinary space but scored in log space.
     """
@@ -77,8 +55,7 @@ def _fit(ns, ys, log_basis):
     max_log = max(logs)
     xs = [math.exp(max(-700.0, v - max_log)) for v in logs]
     log_ys = [math.log(max(EPS, y)) for y in ys]
-
-    if max(logs) - min(logs) < 1e-10:  # constant basis
+    if max(logs) - min(logs) < 1e-10:
         center = statistics.mean(log_ys)
         pred = [math.exp(center)] * len(ys)
         residuals = [math.log(pred[i] / ys[i]) for i in range(len(ys))]
@@ -88,17 +65,12 @@ def _fit(ns, ys, log_basis):
                 "predictions": pred, "log_residuals": residuals,
                 "log_rmse": math.sqrt(rss / len(ys)),
                 "fit_error": math.sqrt(statistics.mean(((pred[i]-ys[i])/ys[i])**2 for i in range(len(ys))))}
-
-    # Include zero offset, cover small/moderate offsets, then densely search
-    # close to the smallest observation. A true fixed cost can be >99% of the
-    # smallest measured cost when the first N is small (e.g. 1000 + 2*NlogN).
     min_y = min(ys)
     offsets = [0.0]
     for i in range(1, 101):
         offsets.append(min_y * 0.9 * (i / 100.0) ** 2)
     for i in range(1, 401):
         offsets.append(min_y * (0.9 + 0.099999 * i / 400.0))
-
     best = None
     for offset in offsets:
         adjusted = [y - offset for y in ys]
@@ -111,13 +83,10 @@ def _fit(ns, ys, log_basis):
                 for i in range(len(ys))]
         residuals = [math.log(pred[i] / ys[i]) for i in range(len(ys))]
         rss = sum(r * r for r in residuals)
-        # Two fitted parameters (offset and scale); use the same criterion for
-        # every candidate, so model comparison remains consistent.
         bic = len(ys) * math.log(max(EPS, rss / len(ys))) + 2 * math.log(len(ys))
         item = (bic, offset, scale, pred, residuals)
         if best is None or item[0] < best[0]:
             best = item
-
     if best is None:
         return None
     bic, offset, scale, pred, residuals = best
@@ -125,8 +94,6 @@ def _fit(ns, ys, log_basis):
             "predictions": pred, "log_residuals": residuals,
             "log_rmse": math.sqrt(statistics.mean(r*r for r in residuals)),
             "fit_error": math.sqrt(statistics.mean(((pred[i]-ys[i])/ys[i])**2 for i in range(len(ys))))}
-
-
 def _growth_diagnostics(ns, ys):
     local = []
     for i in range(len(ns) - 1):
@@ -145,11 +112,8 @@ def _growth_diagnostics(ns, ys):
             "plateau_intervals": plateaus,
             "decreasing_intervals": decreases,
             "large_jump_intervals": jumps}
-
-
 def _resolution_limited_constant(ns, ys, growth, selected_method, points):
     """Recognize instruction traces whose apparent growth is below resolution.
-
     Small scanf/printf instruction-count changes as scalar values gain decimal
     digits should not turn a constant-time program into O(log N). This rule is
     limited to instruction counters and requires a narrow, stable trace.
@@ -174,8 +138,6 @@ def _resolution_limited_constant(ns, ys, growth, selected_method, points):
         and not growth["decreasing_intervals"]
         and not growth["large_jump_intervals"]
     )
-
-
 def _inconclusive(reason, points, excluded, selected_method, raw, warnings=None, **extra):
     result = {"complexity": "inconclusive", "dominant_asymptotic": "inconclusive",
               "generic_family": "Inconclusive", "family": "Inconclusive",
@@ -187,8 +149,6 @@ def _inconclusive(reason, points, excluded, selected_method, raw, warnings=None,
               "raw_measurements": list(raw), "observations_used": points}
     result.update(extra)
     return result
-
-
 def _fit_growth_impl(measurements, config=None):
     grouped, excluded, methods = {}, [], {}
     for i, row in enumerate(measurements or []):
@@ -203,12 +163,10 @@ def _fit_growth_impl(measurements, config=None):
             continue
         grouped.setdefault(n, []).append(cost)
         methods[method] = methods.get(method, 0) + 1
-
     selected_method = next(iter(methods)) if len(methods) == 1 else None
     if len(methods) > 1:
         return _inconclusive("Mixed measurement methods have incompatible counter units; measurements were not combined.",
                              [], excluded, None, list(measurements or []), ["mixed_measurement_methods"])
-
     points = [{"n": n, "cost": statistics.median(v), "method": selected_method,
                "replicate_count": len(v),
                "replicate_spread": round((max(v)-min(v))/max(EPS, statistics.median(v)), 6) if len(v)>1 else 0.0}
@@ -216,11 +174,7 @@ def _fit_growth_impl(measurements, config=None):
     if len(points) < 5:
         return _inconclusive("Fewer than five distinct valid input sizes.", points, excluded,
                              selected_method, list(measurements or []))
-
     ns, ys = [p["n"] for p in points], [p["cost"] for p in points]
-    # Fit all candidate families, then separately check whether the observed
-    # instruction growth is below practical measurement resolution.
-
     candidates = []
     for family, label, log_fn in _models():
         try:
@@ -232,7 +186,6 @@ def _fit_growth_impl(measurements, config=None):
     if not candidates:
         return _inconclusive("No candidate model could be fitted.", points, excluded,
                              selected_method, list(measurements or []))
-
     candidates.sort(key=lambda x: x["bic"])
     best = candidates[0]
     gap = candidates[1]["bic"] - best["bic"] if len(candidates) > 1 else None
@@ -245,7 +198,6 @@ def _fit_growth_impl(measurements, config=None):
         confidence = "medium"
     else:
         confidence = "low"
-
     warnings = []
     growth = _growth_diagnostics(ns, ys)
     if gap is not None and gap < 2.0:
@@ -260,10 +212,6 @@ def _fit_growth_impl(measurements, config=None):
         warnings.append("instruction_counts_decrease_with_input_size")
     if growth["effective_power_spread"] is not None and growth["effective_power_spread"] > 3.5:
         warnings.append("irregular_local_growth")
-
-    # Plateaus alone are not measurement failures: they are expected in
-    # constant-time code. A small, stable instruction-count range with tiny
-    # local exponents should beat a negligible fitted log/log-log term.
     ambiguous = gap is not None and gap < 2.0
     poor_fit = rmse > 0.20
     irregular = bool(growth["decreasing_intervals"])
@@ -272,10 +220,6 @@ def _fit_growth_impl(measurements, config=None):
     )
     constant_candidate = next((item for item in candidates
                                if item["complexity"] == "O(1)"), None)
-    # A narrow raw range alone is not proof of constant time: a large fixed
-    # startup/IO cost can hide genuine logarithmic or square-root growth.
-    # Only apply the constant override when the constant model itself remains
-    # statistically competitive with the best growth model.
     constant_is_competitive = (
         constant_candidate is not None
         and constant_candidate["bic"] - best["bic"] < 2.0
@@ -335,10 +279,6 @@ def _fit_growth_impl(measurements, config=None):
         "warnings": warnings, "original_valid_observation_count": len(points) + len(excluded),
         "measurement_method": selected_method, "raw_measurements": list(measurements or []),
         "observations_used": points,
-        # Low-confidence fits also trigger refinement. Previously a modest
-        # BIC gap (2..6) could produce confidence="low" while this flag stayed
-        # false, so the estimator never collected the larger N values needed
-        # to separate nearby families such as N log N vs N log^2 N.
         "needs_more_measurements": bool(
             ambiguous or poor_fit or irregular or confidence == "low"
         ) and not applied_constant_override,
@@ -363,8 +303,6 @@ def _fit_growth_impl(measurements, config=None):
         result["reason"] = "Instruction counts decrease substantially with input size; measurement stability should be checked."
         result["confidence"] = "low"
     return result
-
-
 def fit_growth(measurements, config=None):
     """Backward-compatible public wrapper; always supplies both family keys."""
     result = _fit_growth_impl(measurements, config)

@@ -1,4 +1,3 @@
-"""Authentication helpers for C-Grade teacher and student accounts."""
 from __future__ import annotations
 
 import base64
@@ -19,7 +18,7 @@ from typing import Any
 
 try:
     from . import database
-except ImportError:  # Support the project's existing ``from database import auth`` import.
+except ImportError:
     import database  # type: ignore
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -28,7 +27,6 @@ SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
 
 
 def _session_secret() -> bytes:
-    """Load a stable signing key; create a private local key if none is configured."""
     configured = os.environ.get("CGRADE_SESSION_SECRET") or os.environ.get("SESSION_SECRET")
     if configured:
         return configured.encode("utf-8")
@@ -49,7 +47,6 @@ def _session_secret() -> bytes:
 
 
 def hash_password(password: str) -> str:
-    """Hash passwords with PBKDF2-HMAC-SHA256 and a unique random salt."""
     if not isinstance(password, str) or not password:
         raise ValueError("Password must not be empty.")
     salt = secrets.token_bytes(16)
@@ -78,7 +75,6 @@ def verify_password(password: str, stored_hash: str) -> bool:
             return hmac.compare_digest(actual, expected)
         except (ValueError, TypeError):
             return False
-    # Backward compatibility for databases created by the previous SHA-256 implementation.
     legacy = hashlib.sha256(password.encode("utf-8")).hexdigest()
     return hmac.compare_digest(legacy, stored_hash)
 
@@ -94,7 +90,6 @@ def verify_teacher(username: str, password: str) -> bool:
 def authenticate_student(roll_no: str, password: str):
     student = database.get_student_by_roll(roll_no)
     if student and verify_password(password, student["password_hash"]):
-        # Upgrade legacy SHA-256 hashes after a successful login.
         if not student["password_hash"].startswith("pbkdf2_sha256$"):
             database.update_student_password(int(student["id"]), hash_password(password))
         return student

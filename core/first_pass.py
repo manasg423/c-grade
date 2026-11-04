@@ -17,7 +17,6 @@ def run_first_pass(source_path: str, rules_path: str, smoke_input: str = "7 5\n"
         "error": None
     }
 
-    # 1. Validate rules.json and compute SHA-256 hash
     if not os.path.exists(rules_path):
         result["error"] = f"Rules file not found: {rules_path}"
         return result
@@ -33,7 +32,6 @@ def run_first_pass(source_path: str, rules_path: str, smoke_input: str = "7 5\n"
         return result
     result["rules_valid"] = True
 
-    # 2. Check Static Sanity (main, I/O, return)
     if not os.path.exists(source_path):
         result["error"] = f"Source file not found: {source_path}"
         return result
@@ -50,8 +48,6 @@ def run_first_pass(source_path: str, rules_path: str, smoke_input: str = "7 5\n"
         return result
     result["static_sanity"] = True
 
-    # 3. Sandbox Compilation Check
-    # Use the system temp dir so this works on both Linux (/tmp) and Windows.
     binary_dir = os.path.join(tempfile.gettempdir(), "c_grade_bin")
     os.makedirs(binary_dir, exist_ok=True)
     binary_name = os.path.splitext(os.path.basename(source_path))[0] + "_bin"
@@ -70,7 +66,6 @@ def run_first_pass(source_path: str, rules_path: str, smoke_input: str = "7 5\n"
     result["compiled"] = True
     result["binary_path"] = binary_path
 
-    # 4. Smoke Run (Test with user-defined sample input under time/memory limits)
     time_limit = rules.get("time_limit_s", 1.0)
     mem_limit  = rules.get("memory_limit_mb", 64)
 

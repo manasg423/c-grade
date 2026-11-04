@@ -3,15 +3,6 @@ import subprocess
 
 
 def evaluate(source_path: str, binary_path: str, params: dict, limits: dict) -> dict:
-    """
-    Check C source code for compiler warnings and errors using GCC.
-
-    Returns:
-        score: float between 0.0 and 1.0
-        evidence: compiler diagnostics and deductions
-        feedback: summary of findings
-    """
-
     if not os.path.isfile(source_path):
         return {
             "score": 0.0,
@@ -23,38 +14,21 @@ def evaluate(source_path: str, binary_path: str, params: dict, limits: dict) -> 
 
     warning_penalty = params.get("warning_penalty", 0.10)
     error_penalty = params.get("error_penalty", 0.40)
-
-    flags = params.get(
-        "flags",
-        ["-Wall", "-Wextra", "-Wpedantic"]
-    )
-
+    flags = params.get("flags", ["-Wall", "-Wextra", "-Wpedantic"])
     timeout = limits.get("timeout", 10)
 
-    command = [
-        "gcc",
-        "-fsyntax-only",
-        *flags,
-        source_path
-    ]
-
+    command = ["gcc", "-fsyntax-only", *flags, source_path]
     issues = []
     total_deduction = 0.0
 
     try:
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=timeout
-        )
+        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
 
         for line in result.stderr.splitlines():
             if ": warning:" not in line and ": error:" not in line:
                 continue
 
             parts = line.split(":", 4)
-
             filename = parts[0] if len(parts) > 0 else source_path
 
             try:
@@ -69,7 +43,6 @@ def evaluate(source_path: str, binary_path: str, params: dict, limits: dict) -> 
 
             severity = "error" if ": error:" in line else "warning"
             message = parts[-1].strip()
-
             penalty = error_penalty if severity == "error" else warning_penalty
             total_deduction += penalty
 
@@ -87,28 +60,16 @@ def evaluate(source_path: str, binary_path: str, params: dict, limits: dict) -> 
         score = round(max(0.0, 1.0 - total_deduction), 2)
 
         if issues:
-            error_count = sum(
-                issue["severity"] == "error" for issue in issues
-            )
-            warning_count = sum(
-                issue["severity"] == "warning" for issue in issues
-            )
-
+            error_count = sum(issue["severity"] == "error" for issue in issues)
+            warning_count = sum(issue["severity"] == "warning" for issue in issues)
             summary = []
             if error_count:
                 summary.append(f"{error_count} error(s)")
             if warning_count:
                 summary.append(f"{warning_count} warning(s)")
 
-            highlights = [
-                f"L{issue['line']}: {issue['message']}"
-                for issue in issues[:2]
-            ]
-
-            feedback = (
-                f"Detected {', '.join(summary)}. Issues: "
-                + "; ".join(highlights)
-            )
+            highlights = [f"L{issue['line']}: {issue['message']}" for issue in issues[:2]]
+            feedback = (f"Detected {', '.join(summary)}. Issues: " + "; ".join(highlights))
         else:
             feedback = "No compiler warnings or errors detected."
 

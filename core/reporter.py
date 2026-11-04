@@ -1,18 +1,3 @@
-"""
-core/reporter.py
-----------------
-Collates all analyzer results and first-pass gatekeeper data into a
-structured final report. Writes two artefacts into the reports/ directory:
-
-  problems/<problem>/reports/<stem>.json  — machine-readable audit report (includes full evidence)
-  problems/<problem>/reports/<stem>.txt   — student-facing report (actionable, without plagiarism)
-
-Public API
-----------
-  generate_report(submission_path, problem_id, rules, first_pass_result,
-                  analyzer_results) -> dict
-"""
-
 from __future__ import annotations
 
 import json
@@ -25,12 +10,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
 def _tool_version(cmd: list[str]) -> str:
-    """Return the first line of a tool's --version output, or 'n/a'."""
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=5
@@ -62,7 +42,6 @@ def _letter_grade(score: float) -> str:
 
 
 def _build_usefulness_limitations() -> dict:
-    """Fixed usefulness/limitations section as specified by the assignment."""
     return {
         "usefulness": [
             {
@@ -149,13 +128,8 @@ def _build_usefulness_limitations() -> dict:
 
 
 def generate_actionable_suggestions(metrics: list[dict], first_pass: dict) -> list[str]:
-    """
-    Generates short, concrete, actionable suggestions for the student
-    on how to improve their grade. Excludes plagiarism completely.
-    """
     suggestions: list[str] = []
 
-    # 1. Gatekeeper / Compilation / Infinite loop
     if not first_pass.get("compiled", True):
         return [
             "Fix compilation errors: verify syntax, add necessary header files (e.g. #include <stdio.h>), and check semicolon placement."
@@ -167,14 +141,12 @@ def generate_actionable_suggestions(metrics: list[dict], first_pass: dict) -> li
 
     for m in metrics:
         a_name = m.get("analyzer", "")
-        # NEVER give plagiarism suggestions to the student
         if a_name == "similarity_flag" or "plagiarism" in a_name.lower() or "originality" in a_name.lower():
             continue
 
         score = float(m.get("score", 1.0))
         ev = m.get("evidence", {}) or {}
 
-        # Only give tips where student lost marks (score < 0.85)
         if score >= 0.85:
             continue
 
@@ -285,7 +257,6 @@ def generate_actionable_suggestions(metrics: list[dict], first_pass: dict) -> li
                     "Improve code readability: use meaningful variable names, add comments, and maintain consistent indentation."
                 )
 
-    # Deduplicate while preserving order
     seen = set()
     unique_suggestions = []
     for s in suggestions:
@@ -300,10 +271,6 @@ def generate_actionable_suggestions(metrics: list[dict], first_pass: dict) -> li
 
     return unique_suggestions[:5]
 
-
-# ---------------------------------------------------------------------------
-# Human-readable text report builder (STUDENT VIEW)
-# ---------------------------------------------------------------------------
 
 def _build_text_report(report: dict) -> str:
     sub     = os.path.basename(report["submission"])
@@ -323,7 +290,6 @@ def _build_text_report(report: dict) -> str:
     )
     lines.append("")
 
-    # --- Gatekeeper summary ---
     lines.append("  -- Gatekeeper Status --")
     lines.append(f"  Compiled       : {'YES' if fp.get('compiled') else 'NO'}")
     lines.append(f"  Smoke Test     : {'PASSED' if fp.get('smoke_ok') else 'FAILED'}")
@@ -333,7 +299,6 @@ def _build_text_report(report: dict) -> str:
         lines.append(f"  Diagnostic     : {fp['error']}")
     lines.append("")
 
-    # --- Student Score table (EXCLUDES PLAGIARISM) ---
     col_w = [18, 7, 9, 8]
     hdr = (
         f"  {'Metric':<{col_w[0]}} {'Weight':>{col_w[1]}} "
@@ -345,7 +310,6 @@ def _build_text_report(report: dict) -> str:
     for m in metrics:
         a_name = m.get("analyzer", "")
         m_name = m.get("name", "")
-        # NEVER expose plagiarism/similarity to student
         if a_name == "similarity_flag" or "plagiarism" in m_name.lower() or "originality" in m_name.lower():
             continue
 
@@ -354,7 +318,6 @@ def _build_text_report(report: dict) -> str:
         score   = m["score"]
         contrib = m["contribution"]
         fb      = m.get("feedback", "")
-        # Omit internal failure notes from student summary
         if "Analyzer failures:" in fb:
             fb = fb.split("Analyzer failures:")[0].strip()
         fb_s    = (fb[:50] + "...") if len(fb) > 53 else fb
@@ -368,10 +331,8 @@ def _build_text_report(report: dict) -> str:
 
     lines.append("")
 
-    # --- Counter-examples (failing tests) ---
     failing_tests: list[dict] = []
     for m in metrics:
-        # Don't check plagiarism
         if m.get("analyzer") == "similarity_flag":
             continue
         for fail in m.get("evidence", {}).get("failing", []):
@@ -392,7 +353,6 @@ def _build_text_report(report: dict) -> str:
                 lines.append(f"          WHY      : {ft['note']}")
         lines.append("")
 
-    # --- Meaningful, actionable suggestions (NO PLAGIARISM) ---
     actionable_tips = generate_actionable_suggestions(metrics, fp)
     lines.append("  -- Suggestions to Raise Your Grade --")
     for tip in actionable_tips:
@@ -403,10 +363,6 @@ def _build_text_report(report: dict) -> str:
     return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
 def generate_report(
     submission_path: str,
     problem_id: str,
@@ -414,21 +370,6 @@ def generate_report(
     first_pass_result: dict,
     analyzer_results: dict,
 ) -> dict:
-    """
-    Build the full report dictionary, write it to disk, and return it.
-
-    Parameters
-    ----------
-    submission_path   : absolute or relative path to the student's .c file
-    problem_id        : problem slug (e.g. "add", "sort")
-    rules             : the parsed rules.json dict
-    first_pass_result : dict returned by core.first_pass.run_first_pass()
-    analyzer_results  : {analyzer_name: {"score", "evidence", "feedback"}}
-
-    Returns
-    -------
-    The in-memory report dict (same object written to JSON).
-    """
     metrics_cfg  = rules.get("metrics", [])
     total_score  = 0.0
     total_weight = 0.0
@@ -446,7 +387,6 @@ def generate_report(
         total_score  += score * weight
         contribution  = round(score * weight * 100, 1)
 
-        # Collect similarity/plagiarism flag for instructor audit JSON only
         evidence = res.get("evidence", {})
         if a_name == "similarity_flag" and evidence.get("flagged"):
             flags.append(
@@ -495,9 +435,6 @@ def generate_report(
         "tool_versions":          _collect_tool_versions(),
     }
 
-    # ------------------------------------------------------------------
-    # Persist to disk
-    # ------------------------------------------------------------------
     stem       = os.path.splitext(os.path.basename(submission_path))[0]
     report_dir = PROJECT_ROOT / "problems" / str(problem_id) / "reports"
     report_dir.mkdir(parents=True, exist_ok=True)

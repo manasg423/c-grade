@@ -9,12 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-# ---------------------------------------------------------------------------
-# Knowledge Base: Diagnostic Patterns -> Metadata & Remediation Guidance
-# ---------------------------------------------------------------------------
-
 DIAGNOSTIC_KB: dict[str, dict[str, str]] = {
-    # Heap & Stack Memory Violations (ASan)
     "stack-buffer-overflow": {
         "title": "Stack Buffer Overflow",
         "category": "memory_error",
@@ -49,7 +44,6 @@ DIAGNOSTIC_KB: dict[str, dict[str, str]] = {
             "are guarded so index >= 0."
         ),
     },
-    # Dynamic Lifecycle & Pointer Errors (ASan / LSan)
     "heap-use-after-free": {
         "title": "Use-After-Free",
         "category": "memory_error",
@@ -90,7 +84,6 @@ DIAGNOSTIC_KB: dict[str, dict[str, str]] = {
             "is executed before functions return or main() exits."
         ),
     },
-    # Fatal Crashes & Segmentation Faults
     "SEGV on unknown address": {
         "title": "Segmentation Fault / Bad Memory Access",
         "category": "crash",
@@ -107,7 +100,6 @@ DIAGNOSTIC_KB: dict[str, dict[str, str]] = {
             "values of malloc() or search lookup functions before accessing fields or indices."
         ),
     },
-    # Undefined Behavior (UBSan)
     "division-by-zero": {
         "title": "Division / Modulo by Zero",
         "category": "undefined_behavior",
@@ -150,12 +142,7 @@ DIAGNOSTIC_KB: dict[str, dict[str, str]] = {
     },
 }
 
-# ---------------------------------------------------------------------------
-# Helper Routines
-# ---------------------------------------------------------------------------
-
 def _terminate_process_group(proc: subprocess.Popen) -> None:
-    """Terminate the spawned process group cleanly to avoid zombie subprocesses."""
     try:
         os.killpg(proc.pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError, OSError):
@@ -170,17 +157,13 @@ def _terminate_process_group(proc: subprocess.Popen) -> None:
 
 
 def _extract_issue_details(stderr: str, source_filename: str) -> dict[str, Any]:
-    """Parse raw ASan/UBSan diagnostics into structured line-level data."""
     matched_key = next((k for k in DIAGNOSTIC_KB if k in stderr), None)
 
     line_no, col_no = 0, 0
     loc_match = re.search(rf"{re.escape(source_filename)}:(\d+)(?::(\d+))?", stderr)
     if loc_match:
-        try:
-            line_no = int(loc_match.group(1))
-            col_no = int(loc_match.group(2)) if loc_match.group(2) else 0
-        except (ValueError, TypeError):
-            pass
+        line_no = int(loc_match.group(1))
+        col_no = int(loc_match.group(2)) if loc_match.group(2) else 0
 
     if matched_key:
         info = DIAGNOSTIC_KB[matched_key]
@@ -214,7 +197,6 @@ def _run_sandboxed_case(
     env: dict[str, str],
     output_limit_bytes: int = 2 * 1024 * 1024,
 ) -> dict[str, Any]:
-    """Execute a single test case with timeout and output capture limits."""
     start = time.monotonic()
 
     try:
@@ -271,17 +253,12 @@ def _run_sandboxed_case(
         }
 
 
-# ---------------------------------------------------------------------------
-# Main Analyzer Entry Point
-# ---------------------------------------------------------------------------
-
 def evaluate(
     source_path: str,
     binary_path: str,
     params: dict | None = None,
     limits: dict | None = None,
 ) -> dict:
-    """Analyze a student's C code using AddressSanitizer and UndefinedBehaviorSanitizer."""
     params = params if isinstance(params, dict) else {}
     limits = limits if isinstance(limits, dict) else {}
 
@@ -303,10 +280,6 @@ def evaluate(
         "timeout": float(params.get("timeout_penalty", 0.25)),
     }
 
-    # -----------------------------------------------------------------------
-    # Resolve Inputs: Priority to sample_input (default in rules.json),
-    # followed by test_cases, then test_inputs fallback
-    # -----------------------------------------------------------------------
     test_cases: list[dict[str, Any]] = []
 
     if "sample_input" in params and params["sample_input"] is not None:
@@ -409,7 +382,6 @@ def evaluate(
 
         for idx, case in enumerate(test_cases, 1):
             inp_data = str(case.get("input", ""))
-            # Handle literal escaped newlines from JSON strings like "5\\n 9 2 7 4 1"
             if "\\n" in inp_data:
                 inp_data = inp_data.replace("\\n", "\n")
             if inp_data and not inp_data.endswith("\n"):

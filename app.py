@@ -1,12 +1,5 @@
 from __future__ import annotations
 
-# """Authenticated student and teacher portal for the C-Grade engine."""
-
-#TEACHER_USERNAME=
-#TEACHER_PASSWORD=
-#CGRADE_SESSION_SECRET=your-long-random-secret-key
-
-import glob
 import json
 import os
 import re
@@ -42,7 +35,6 @@ from test_case_generator import generate_all_test_cases
 st.set_page_config(page_title="C-Grade Portal", page_icon="C", layout="wide")
 database.initialize_database()
 
-# Asymptotic Big-O complexity options for dropdown
 COMPLEXITY_OPTIONS = [
     "O(1)",
     "O(log N)",
@@ -93,13 +85,6 @@ st.markdown(
 )
 
 
-def available_rubrics() -> list[str]:
-    return sorted(
-        Path(path).name.removesuffix("_rules.json")
-        for path in glob.glob(str(PROBLEMS_DIR / "*" / "*_rules.json"))
-    )
-
-
 def metric_score(report: dict, category: str) -> float | None:
     metrics = report.get("metrics", [])
     matched = []
@@ -137,7 +122,6 @@ def assignment_deadline(due_value: str | None) -> tuple[str, bool]:
     return "Open", False
 
 def first_sentence(text: str) -> str:
-    """Return feedback only up to the first full stop."""
     text = re.sub(r"\s+", " ", str(text or "")).strip()
 
     match = re.search(r"\.(?=\s|$)", text)
@@ -172,7 +156,6 @@ def build_text_grading_report(
     filename: str = "",
     is_student: bool = False,
 ) -> str:
-    """Builds the exact plain-text grading report format with full mathematical accuracy and wrapped feedback."""
     display_file = filename or "submission.c"
     metrics = report.get("metrics", [])
 
@@ -200,12 +183,9 @@ def build_text_grading_report(
         earned_str = f"{int(contrib)}" if contrib.is_integer() else f"{contrib:.1f}"
         score_str = f"{earned_str}/{weight_int}"
 
-        # 1. Extract proper feedback data
         raw_fb = m.get("feedback")
         evidence = m.get("evidence", {})
 
-        # If readability or llm_review feedback is truncated (e.g. "Summary: Th")
-        # pull full summary from evidence if available
         if (analyzer == "llm_review" or name == "readability") and isinstance(evidence, dict):
             raw_resp = evidence.get("raw_response", {})
             if isinstance(raw_resp, dict) and raw_resp.get("summary"):
@@ -214,9 +194,8 @@ def build_text_grading_report(
                     raw_fb = summary_text
 
         fb = str(raw_fb or "").strip().replace("\n", " ")
-        fb = first_sentence(fb) 
+        fb = first_sentence(fb)
 
-        # Preserve the complete feedback; the report renderer wraps it to 32 columns.
         if is_student and any(k in name.lower() or k in analyzer.lower() for k in ("similarity", "originality", "plagiarism")):
             fb = "similarity verified."
 
@@ -289,7 +268,6 @@ def build_text_grading_report(
         for s in suggestions:
             lines.append(f"- {s}")
 
-    # --- Usefulness & limitations of this evaluation ---
     lines.append("--- Usefulness & limitations of this evaluation ---")
     lines.append("Useful for:")
     lines.append("1. Multi-dimensional technical grading (beyond pass/fail)")
@@ -328,9 +306,7 @@ def build_text_grading_report(
 def show_report(report: dict, score: float | None, io_score: float | None,
                 quality_score: float | None, sanitizer_score: float | None,
                 feedback: str | None, include_private: bool = False,
-                student_name: str = "", roll_no: str = "",
-                assignment_title: str = "", submitted_at: str = "",
-                submitted_code: str = "") -> None:
+                roll_no: str = "", assignment_title: str = "") -> None:
     columns = st.columns(4)
     values = (
         ("Overall", score),
@@ -464,12 +440,11 @@ def login_screen() -> None:
         st.markdown('<div class="portal-rule"></div>', unsafe_allow_html=True)
 
 
-def new_assignment_view(assignments) -> None:
+def new_assignment_view() -> None:
     st.markdown('<p class="portal-kicker">Course setup</p>', unsafe_allow_html=True)
     st.title("New assignment")
     st.caption("All configuration fields are required. Problem description is optional.")
 
-    # Pinned persistent success message: stays visible after deployment
     if "assignment_deploy_success" in st.session_state:
         st.success(st.session_state["assignment_deploy_success"])
 
@@ -631,7 +606,6 @@ int main() {
     due_value = datetime.combine(due, time.max).isoformat(timespec="seconds")
     assignment_id = database.create_assignment(title, description, due_value, problem_id)
 
-    # Reset form revision so all input fields return to blank/default
     st.session_state["last_assignment_defaults"] = {
         "form_revision": int(saved_form.get("form_revision", 0)) + 1
     }
@@ -650,7 +624,6 @@ int main() {
                 num_edge=5,
                 force_regenerate=True,
             )
-        # Persistent success message stored in session_state
         st.session_state["assignment_deploy_success"] = (
             f"Assignment '{title}' (slug: {problem_id}) deployed successfully! "
             f"Generated {generated.get('io_count', 0)} I/O and {generated.get('edge_count', 0)} edge test cases."
@@ -933,7 +906,6 @@ def assignment_materials_view(assignments) -> None:
 
 
 def teacher_view() -> None:
-    user = st.session_state["portal_user"]
     st.sidebar.title("C-Grade")
     st.sidebar.caption("Teacher workspace")
     section = st.sidebar.radio(
@@ -1071,7 +1043,7 @@ def teacher_view() -> None:
         st.title("Assignment workspace")
         new_tab, edit_tab = st.tabs(["New assignment", "Edit assignment"])
         with new_tab:
-            new_assignment_view(assignments)
+            new_assignment_view()
         with edit_tab:
             assignment_materials_view(assignments)
 
@@ -1112,10 +1084,8 @@ def teacher_view() -> None:
             show_report(raw_report, record["score"], record["io_score"],
                         record["quality_score"], record["sanitizer_score"],
                         record["feedback_summary"], include_private=True,
-                        student_name=record["name"], roll_no=record["roll_no"],
-                        assignment_title=labels[assignment_id],
-                        submitted_at=record["submitted_at"],
-                        submitted_code=record["submitted_code"])
+                        roll_no=record["roll_no"],
+                        assignment_title=labels[assignment_id])
 
 
 def student_view() -> None:
@@ -1155,10 +1125,8 @@ def student_view() -> None:
             show_report(raw_report, selected["score"], selected["io_score"],
                         selected["quality_score"], selected["sanitizer_score"],
                         selected["feedback_summary"], include_private=False,
-                        student_name=user["name"], roll_no=user["roll_no"],
-                        assignment_title=selected["title"],
-                        submitted_at=selected["submitted_at"],
-                        submitted_code=selected["submitted_code"])
+                        roll_no=user["roll_no"],
+                        assignment_title=selected["title"])
 
     elif section == "Submit code":
         st.markdown('<p class="portal-kicker">Assessment submission</p>', unsafe_allow_html=True)
@@ -1180,9 +1148,8 @@ def student_view() -> None:
                     prior_report, prior["score"], prior["io_score"],
                     prior["quality_score"], prior["sanitizer_score"],
                     prior["feedback_summary"], include_private=False,
-                    student_name=user["name"], roll_no=user["roll_no"],
+                    roll_no=user["roll_no"],
                     assignment_title=assignment["title"],
-                    submitted_at=prior["submitted_at"], submitted_code=prior["submitted_code"],
                 )
             return
 
@@ -1232,8 +1199,6 @@ def student_view() -> None:
                 if st.button("Confirm & Finalize Submission", type="primary", disabled=(not verified or busy), key=f"finalize_submission_{assignment_id}"):
                     st.session_state["submission_in_progress"] = True
                     try:
-                        # The unique (assignment_id, student_id) constraint is the authoritative
-                        # concurrency guard; the record is created exactly once before evaluation.
                         source_text = pending["source"]
                         problem_slug = str(latest_assignment["problem_id"] or "")
                         if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", problem_slug):
@@ -1288,8 +1253,8 @@ def student_view() -> None:
             st.success("Your one submission has been evaluated and saved." if result["status"] == "graded" else "Your one submission has been recorded; review the evaluation report.")
             show_report(report, result["score"], result["io_score"], result["quality_score"],
                         result["sanitizer_score"], result["feedback_summary"], include_private=False,
-                        student_name=user["name"], roll_no=user["roll_no"],
-                        assignment_title=last_result["assignment_title"], submitted_code="")
+                        roll_no=user["roll_no"],
+                        assignment_title=last_result["assignment_title"])
 
     else:
         st.markdown('<p class="portal-kicker">Account security</p>', unsafe_allow_html=True)

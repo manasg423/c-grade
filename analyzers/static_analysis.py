@@ -16,11 +16,6 @@ def evaluate(
     params: dict,
     limits: dict
 ) -> dict:
-
-    # ---------------------------------------------------------
-    # 1. Validate source file
-    # ---------------------------------------------------------
-
     if not os.path.exists(source_path):
         return {
             "score": 0.0,
@@ -31,11 +26,6 @@ def evaluate(
         }
 
     params = params or {}
-    limits = limits or {}
-
-    # ---------------------------------------------------------
-    # 2. Configuration and initialization
-    # ---------------------------------------------------------
 
     deductions = {
         "error": float(params.get("error_penalty", 0.40)),
@@ -48,10 +38,6 @@ def evaluate(
     issues = []
     total_deduction = 0.0
     analyzer_failures = []
-
-    # ---------------------------------------------------------
-    # Helper: Add issue and calculate penalty
-    # ---------------------------------------------------------
 
     def add_issue(tool, severity, issue_id, line, message):
         nonlocal total_deduction
@@ -67,10 +53,6 @@ def evaluate(
             "message": message,
             "penalty": penalty
         })
-
-    # ---------------------------------------------------------
-    # 3. Cppcheck Static Analysis
-    # ---------------------------------------------------------
 
     if params.get("enable_cppcheck", True):
 
@@ -98,7 +80,6 @@ def evaluate(
 
                         issue_id = error.get("id", "unknown")
 
-                        # Ignore non-actionable diagnostics
                         if issue_id in (
                             "missingInclude",
                             "missingIncludeSystem",
@@ -149,10 +130,6 @@ def evaluate(
                 f"Cppcheck: {type(e).__name__}"
             )
 
-    # ---------------------------------------------------------
-    # 4. GCC Compiler Warnings and Errors
-    # ---------------------------------------------------------
-
     if params.get("enable_gcc_warnings", True):
 
         try:
@@ -170,7 +147,6 @@ def evaluate(
                 timeout=10
             )
 
-            # Handles paths containing colons as well
             diagnostic_pattern = re.compile(
                 r"^(.*?):(\d+)(?::\d+)?:\s*"
                 r"(warning|error):\s*(.*)$"
@@ -206,10 +182,6 @@ def evaluate(
                 f"GCC: {type(e).__name__}"
             )
 
-    # ---------------------------------------------------------
-    # 5. Basic Code Formatting Analysis
-    # ---------------------------------------------------------
-
     if params.get("enable_format_check", True):
 
         try:
@@ -230,20 +202,15 @@ def evaluate(
                 if not stripped:
                     continue
 
-                # Check excessively long lines
                 if len(line.rstrip("\r\n")) > 120:
                     bad_lines += 1
 
-                # Remove for-loop headers before checking
-                # multiple statements on one line.
                 statement_line = re.sub(
                     r"\bfor\s*\([^)]*\)",
                     "",
                     stripped
                 )
 
-                # Multiple semicolons may indicate multiple
-                # statements on the same line.
                 if statement_line.count(";") > 1:
                     bad_lines += 1
 
@@ -261,10 +228,6 @@ def evaluate(
             analyzer_failures.append(
                 f"Formatting check: {type(e).__name__}"
             )
-
-    # ---------------------------------------------------------
-    # 6. Lizard: Cyclomatic Complexity Analysis
-    # ---------------------------------------------------------
 
     if params.get("enable_lizard", True):
 
@@ -304,18 +267,10 @@ def evaluate(
                     f"Lizard: {type(e).__name__}"
                 )
 
-    # ---------------------------------------------------------
-    # 7. Calculate Final Score
-    # ---------------------------------------------------------
-
     score = round(
         max(0.0, 1.0 - total_deduction),
         2
     )
-
-    # ---------------------------------------------------------
-    # 8. Generate One Combined Feedback Message
-    # ---------------------------------------------------------
 
     error_count = sum(
         1 for issue in issues
@@ -332,8 +287,6 @@ def evaluate(
         if issue["severity"] == "style"
     )
 
-    # Analyzer failures take priority because the evaluation
-    # may be incomplete.
     if analyzer_failures:
 
         feedback = "Static analysis incomplete; review diagnostics."
@@ -381,10 +334,6 @@ def evaluate(
     else:
 
         feedback = "Review detected static analysis issues."
-
-    # ---------------------------------------------------------
-    # 9. Return Analyzer Results
-    # ---------------------------------------------------------
 
     return {
         "score": score,

@@ -1,5 +1,3 @@
-"""Translate teacher assignment controls into the C-Grade rules format."""
-
 from __future__ import annotations
 
 
