@@ -1,10 +1,3 @@
-"""C-Grade Engine complexity estimator.
-Public compatibility API:
-    evaluate(source_path, binary_path=None, params=None, limits=None) -> dict
-Only genuine Valgrind Callgrind instruction counts are accepted. Input analysis
-and raw stdin generation are delegated to input_spec.py; model fitting remains
-in complexity_fitting.py and its public contract is unchanged.
-"""
 from __future__ import annotations
 import math
 import os
