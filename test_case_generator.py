@@ -1,12 +1,43 @@
+"""
+test_case_generator.py
+-----------------------
+Universal, completely LLM-generated blackbox test case generator for C-Grade Engine.
+
+Design Principles:
+  1. Completely LLM Generated:
+     Uses local Ollama (/api/chat with think: False) to analyze ANY teacher reference C code (oracle.c),
+     sample input, and problem description.
+     The LLM identifies:
+       - The exact standard input/output layout (lines, tokens, delimiters, types).
+       - The core algorithm, invariants, preconditions, and return expectations.
+     The LLM synthesizes:
+       - 'io_tests': typical, diverse, non-trivial inputs satisfying problem requirements.
+       - 'edge_cases': boundary, corner, adversarial inputs (minimal sizes, identical elements, negatives, limits).
+     Zero problem-specific hardcoding. Completely blackbox and universal for any C problem in the world.
+
+  2. Pure Ground-Truth Blackbox Execution:
+     Compiles the teacher's reference implementation (oracle.c) to a native executable binary.
+     Pipes each generated input to stdin and captures stdout to produce matching .out files.
+
+Output Structure:
+  problems/<problem>/tests/auto_generated/gen_X.in  &  gen_X.out
+  problems/<problem>/tests/edge_cases/edge_XX.in    &  edge_XX.out
+
+Public API:
+  generate_all_test_cases(problem_id, tests_dir=None, oracle_path=None, sample_input=None, num_io=5, num_edge=5) -> dict
+"""
+
 from __future__ import annotations
 
 import argparse
 import json
 import os
 import random
+import re
 import shutil
 import subprocess
 import tempfile
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Optional
@@ -16,7 +47,12 @@ OLLAMA_CHAT_URL = "http://127.0.0.1:11434/api/chat"
 DEFAULT_MODEL = "qwen3.5:2b"
 
 
+# ---------------------------------------------------------------------------
+# Blackbox Oracle Compilation & Execution
+# ---------------------------------------------------------------------------
+
 def compile_oracle(oracle_path: str, output_bin: str) -> Optional[str]:
+    """Compiles oracle.c into an executable binary using gcc or clang."""
     if not os.path.isfile(oracle_path):
         return None
 
@@ -42,6 +78,7 @@ def compile_oracle(oracle_path: str, output_bin: str) -> Optional[str]:
 
 
 def run_oracle(oracle_bin: str, stdin_text: str, timeout: float = 2.0) -> str:
+    """Executes compiled oracle binary on stdin_text and returns stdout string."""
     try:
         proc = subprocess.run(
             [oracle_bin],
@@ -55,6 +92,10 @@ def run_oracle(oracle_bin: str, stdin_text: str, timeout: float = 2.0) -> str:
         return ""
 
 
+# ---------------------------------------------------------------------------
+# LLM Chat Query Helper
+# ---------------------------------------------------------------------------
+
 def query_ollama_chat(
     messages: list[dict],
     model: str = DEFAULT_MODEL,
@@ -63,6 +104,10 @@ def query_ollama_chat(
     timeout: float = 90.0,
     seed: Optional[int] = None,
 ) -> Optional[dict]:
+    """
+    Sends chat prompt to local Ollama server using /api/chat with think: False.
+    Fast (20-30s), avoids context length exhaustion from hidden thinking tokens.
+    """
     if seed is None:
         seed = random.randint(1, 1000000)
 
@@ -95,6 +140,10 @@ def query_ollama_chat(
         return None
 
 
+# ---------------------------------------------------------------------------
+# Completely LLM-Generated Test Suite Synthesis
+# ---------------------------------------------------------------------------
+
 def generate_tests_with_llm(
     problem_id: str,
     oracle_code: str,
@@ -105,50 +154,31 @@ def generate_tests_with_llm(
     model: str = DEFAULT_MODEL,
     sample_output: Optional[str] = None,
 ) -> dict:
+    """
+    Autonomous LLM test case generator.
+    Completely blackbox and problem-independent.
+    """
     system_prompt = (
         "You are an expert autonomous software testing agent for C programming assignments. "
         "Your task is to analyze a reference C implementation (oracle.c), an optional problem description, "
         "and sample I/O to synthesize a rigorous, production-grade test suite.\n\n"
-        "MOST IMPORTANT RULE: treat the sample input as a TEMPLATE. Every test case (io_tests AND edge_cases) must keep the "
-        "same lines, in the same order, with the same kind of value on each line, and the same separators. "
-        "Only the values inside the template change. A test case is the full contents of stdin for one run of the program, "
-        "so it contains ALL the lines the sample has (header line(s) with counts/parameters, then the data lines). "
-        "A test case made of one lone number is wrong unless the sample input itself is one lone number.\n\n"
         "Guidelines:\n"
-        "1. I/O Contract Alignment: Read the sample input line by line and match each line to the scanf/fgets/getchar/cin calls in main(). "
-        "Work out what every line means (a count N, a parameter, an array of N values, a string, matrix rows, etc.). "
-        "If a number says how many values follow, the test case MUST contain exactly that many values. "
-        "Count the values before you write them. Header numbers (N, K, R, C, target, ...) must always stay small and valid.\n"
-        "2. Problem Semantics: Infer preconditions, invariants, and constraints from the oracle code and the Problem Description (if given). "
-        "If the algorithm only works for special input, the generated data MUST have that property "
-        "(sorted, rotated, distinct, positive, a majority element exists, a valid answer exists, etc.). "
-        "Build such data in two steps: create the plain version first, then apply the transformation. "
-        "Do not use random data when the program expects structured data.\n"
+        "1. I/O Contract Alignment: Analyze main() and all input-reading calls (scanf, fgets, getchar, cin) alongside the sample input. "
+        "If the input expects a size N followed by an array of N elements, your generated strings MUST contain exactly N elements. "
+        "Never generate an array length that contradicts its header.\n"
+        "2. Problem Semantics: Infer preconditions, invariants, and constraints primarily from the oracle code. "
+        "If a 'Problem Description' is provided in the prompt, strictly use it to guide the valid cases and intended behavior"
+        "(e.g., ensuring majority elements exist if requested).\n"
         "3. Synthesize Two Categories:\n"
-        "   - 'io_tests': Valid inputs testing the core algorithm. Make them increase in size "
-        "(tiny, small, medium, larger) and vary the values. Make the correct answer vary too "
-        "(sometimes the answer exists, sometimes it does not).\n"
-        "   - 'edge_cases': The SAME full template as the sample, but with boundary DATA. Each edge case targets a different boundary: "
-        "smallest valid size (usually N=1), all identical elements, duplicates, negative values, zero values, "
-        "very large positive or negative int values used only as DATA elements (never as the whole test, and never as N), "
-        "answer at the first or last position, answer missing. "
-        "Large values go in the data positions only; the count and parameter positions stay small and valid. "
-        "Use N=0 only if the code clearly handles it.\n"
+        "   - 'io_tests': Diverse, valid inputs testing the core algorithm. Radically vary the sizes (e.g., N=3, N=15, N=50) and value distributions.\n"
+        "   - 'edge_cases': Adversarial inputs testing boundaries and C-specific limits. Force conditions like: minimum valid sizes (N=0 or N=1), "
+        "all identical elements, negative/zero values, and extreme integer bounds (e.g., 2147483647 or -2147483648).\n"
         "4. Output Format: Return STRICTLY valid JSON matching this exact schema:\n"
         "{\n"
         '  "io_tests": ["raw_stdin_string_1", "raw_stdin_string_2"],\n'
         '  "edge_cases": ["raw_stdin_edge_1", "raw_stdin_edge_2"]\n'
         "}\n"
-        "CRITICAL: You must properly escape all newlines inside the JSON strings as `\\n` (e.g., \"5\\n1 2 3 4 5\\n\"). Do not output raw line breaks.\n\n"
-        "FORMAT EXAMPLES (different problems, only to show the idea, never reuse their values):\n"
-        "Example A. Sample \"3 4\\n1 2 3 4\\n5 6 7 8\\n9 10 11 12\\n\" means: line 1 = R and C, then R rows of C integers. "
-        "A correct normal test: \"2 3\\n5 -1 0\\n7 7 2\\n\". "
-        "A correct edge case (one cell, big value in the data): \"1 1\\n2000000000\\n\".\n"
-        "Example B. Sample \"5 7\\n3 9 1 4 8\\n\" means: line 1 = N and a parameter K, line 2 = N integers. "
-        "A correct normal test: \"4 2\\n6 1 8 3\\n\". "
-        "A correct edge case (N=1, big value in the data): \"1 5\\n2000000000\\n\". "
-        "Another correct edge case (all equal, negative): \"3 1\\n-4 -4 -4\\n\".\n"
-        "In every case the number of lines and the number of values match the sample's template.\n"
+        "CRITICAL: You must properly escape all newlines inside the JSON strings as `\\n` (e.g., \"5\\n1 2 3 4 5\\n\"). Do not output raw line breaks."
     )
 
     sample_sec = f"\nTeacher's Sample Input:\n```\n{sample_input}\n```\n" if sample_input else ""
@@ -170,19 +200,11 @@ def generate_tests_with_llm(
         f"Reference Implementation (oracle.c):\n```c\n{oracle_code}\n```\n\n"
         f"Task: Generate exactly {needed_io} diverse 'io_tests' and {needed_edge} 'edge_cases'.\n\n"
         "EXECUTION RULES:\n"
-        "- The sample input above is your TEMPLATE. Every test case, including every edge case, must have the same number of lines "
-        "and the same kind of values on each line as the sample input. Only change the values.\n"
-        "- A test case with only one line or one number is WRONG unless the sample input is one line with one number.\n"
-        "- Check every count: if a line says N, the data that follows must contain exactly N values.\n"
-        "- Respect the properties the oracle code relies on (for example sorted, rotated, distinct, positive, within range). "
-        "Build the data so these properties really hold.\n"
-        "- Generate entirely NEW inputs. Do not reproduce the sample case.\n"
-        "- 'io_tests': order them by increasing size, vary the values, and make sure the answers differ.\n"
-        "- 'edge_cases': full template, each testing a different boundary in the DATA: smallest size, all equal, negatives, zeros, "
-        "very large or very small int values as data elements, answer at first/last position, answer missing, off-by-one setups. "
-        "Header numbers like N must stay small and valid.\n"
+        "- Generate entirely NEW inputs. Do not simply reproduce the sample case.\n"
+        "- Ensure every test case string perfectly matches the input format expected by the oracle's scanf/fgets calls.\n"
+        "- Make the 'io_tests' highly variable in size and data variation.\n"
+        "- Make the 'edge_cases' intentionally tricky to break fragile code (empty cases, max values, off-by-one setups).\n"
         "- EVERY string must end with a trailing escaped newline (`\\n`).\n"
-        "- Before answering, compare each test case with the sample input line by line: same line count, same layout, counts correct.\n"
         "- Output ONLY the raw JSON object. Do not include markdown formatting blocks (```json) or conversational filler."
     )
 
@@ -245,6 +267,12 @@ def generate_tests_with_llm(
 
 
 def _ensure_multiline_format(inp_str: str, sample_input: Optional[str]) -> str:
+    """
+    Validates and normalizes LLM-generated input text.
+    If Line 1 contains a size N and Line 2 contains an array, guarantees
+    that N matches the actual number of elements supplied on Line 2, preventing
+    scanf from reading uninitialized memory.
+    """
     if not inp_str:
         return "\n"
 
@@ -275,7 +303,15 @@ def _ensure_multiline_format(inp_str: str, sample_input: Optional[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
+# ---------------------------------------------------------------------------
+# Emergency Structural Fuzzer (Only if LLM server is unreachable)
+# ---------------------------------------------------------------------------
+
 def emergency_fallback_tests(sample_input: Optional[str], num_io: int, num_edge: int) -> dict:
+    """
+    Universal structural mutation of the teacher's sample input
+    used strictly if Ollama is unreachable.
+    """
     rng = random.Random(42)
     io_cases = []
     edge_cases = []
@@ -308,6 +344,10 @@ def emergency_fallback_tests(sample_input: Optional[str], num_io: int, num_edge:
     }
 
 
+# ---------------------------------------------------------------------------
+# Main Orchestration: File Writing & Blackbox Execution
+# ---------------------------------------------------------------------------
+
 def generate_all_test_cases(
     problem_id: str,
     tests_dir: Optional[str] = None,
@@ -319,6 +359,12 @@ def generate_all_test_cases(
     force_regenerate: bool = True,
     sample_output: Optional[str] = None,
 ) -> dict:
+    """
+    Universal test case generator.
+    Writes:
+      problems/<problem>/tests/auto_generated/gen_X.in  &  gen_X.out
+      problems/<problem>/tests/edge_cases/edge_XX.in    &  edge_XX.out
+    """
     if not tests_dir:
         tests_dir = os.path.join("problems", problem_id, "tests")
     if not oracle_path:
@@ -330,11 +376,13 @@ def generate_all_test_cases(
     os.makedirs(auto_dir, exist_ok=True)
     os.makedirs(edge_dir, exist_ok=True)
 
+    # 1. Read Oracle Code
     oracle_code = ""
     if os.path.isfile(oracle_path):
         with open(oracle_path, "r", encoding="utf-8", errors="ignore") as f:
             oracle_code = f.read()
 
+    # Fill missing sample values from the assignment rules.
     if not sample_input or sample_output is None:
         rules_file = os.path.join("problems", problem_id, f"{problem_id}_rules.json")
         if os.path.isfile(rules_file):
@@ -348,6 +396,7 @@ def generate_all_test_cases(
             except Exception:
                 pass
 
+    # 2. Compile Reference Oracle Binary
     oracle_bin = None
     temp_dir = tempfile.mkdtemp(prefix="cg_oracle_")
     try:
@@ -356,6 +405,7 @@ def generate_all_test_cases(
         if compiled_path and os.path.isfile(compiled_path):
             oracle_bin = compiled_path
 
+        # 3. Generate Inputs with LLM
         test_data = generate_tests_with_llm(
             problem_id=problem_id,
             oracle_code=oracle_code,
@@ -369,6 +419,7 @@ def generate_all_test_cases(
 
         method = f"ollama-{DEFAULT_MODEL}"
 
+        # If LLM returned empty, use emergency structural mutation
         if not test_data.get("io_tests"):
             test_data = emergency_fallback_tests(sample_input, num_io, num_edge)
             method = "sample-input-fuzzer"
@@ -376,6 +427,7 @@ def generate_all_test_cases(
         io_inputs = test_data.get("io_tests", [])[:num_io]
         edge_inputs = test_data.get("edge_cases", [])[:num_edge]
 
+        # 4. Clean existing generated files if force_regenerate
         if force_regenerate:
             for d in [auto_dir, edge_dir]:
                 for f in Path(d).glob("*.in"):
@@ -392,6 +444,7 @@ def generate_all_test_cases(
         generated_io_files = []
         generated_edge_files = []
 
+        # 5. Write I/O Test Cases (.in and matching .out)
         for idx, inp in enumerate(io_inputs, 1):
             in_file = os.path.join(auto_dir, f"gen_{idx:02d}.in")
             out_file = os.path.join(auto_dir, f"gen_{idx:02d}.out")
@@ -417,6 +470,7 @@ def generate_all_test_cases(
                 "files": [f[0] for f in generated_io_files]
             }, mf, indent=2)
 
+        # 6. Write Edge Cases (.in and matching .out)
         for idx, inp in enumerate(edge_inputs, 1):
             in_file = os.path.join(edge_dir, f"edge_{idx:02d}.in")
             out_file = os.path.join(edge_dir, f"edge_{idx:02d}.out")
@@ -463,6 +517,10 @@ def generate_all_test_cases(
         except Exception:
             pass
 
+
+# ---------------------------------------------------------------------------
+# CLI Command Line Interface
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Universal Blackbox C-Grade Test Case Generator")

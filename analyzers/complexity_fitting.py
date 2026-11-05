@@ -1,9 +1,3 @@
-"""Confidence-aware generic complexity fitting for C-Grade Engine.
-Public API and result keys are kept compatible with the previous fitter.
-The fitter compares fixed-cost-plus-growth models in log space, reports
-ambiguity instead of forcing a winner, and exposes growth diagnostics that
-can guide additional profiling.
-"""
 from __future__ import annotations
 import math
 import statistics
@@ -45,10 +39,7 @@ def _models():
                        lambda n, k=k: k * math.log(n) + math.lgamma(n + 1.0)))
     return models
 def _fit(ns, ys, log_basis):
-    """Fit y = A + B*f(n), A,B >= 0, minimizing log-space residuals.
-    Searching A on a bounded deterministic grid avoids the old mismatch where
-    coefficients were estimated in ordinary space but scored in log space.
-    """
+
     logs = [float(log_basis(n)) for n in ns]
     if any(not math.isfinite(v) for v in logs):
         return None
@@ -113,11 +104,6 @@ def _growth_diagnostics(ns, ys):
             "decreasing_intervals": decreases,
             "large_jump_intervals": jumps}
 def _resolution_limited_constant(ns, ys, growth, selected_method, points):
-    """Recognize instruction traces whose apparent growth is below resolution.
-    Small scanf/printf instruction-count changes as scalar values gain decimal
-    digits should not turn a constant-time program into O(log N). This rule is
-    limited to instruction counters and requires a narrow, stable trace.
-    """
     method = (selected_method or "").lower()
     if not any(token in method for token in ("callgrind", "perf", "instruction")):
         return False
