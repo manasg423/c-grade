@@ -1,4 +1,9 @@
 from __future__ import annotations
+# """Authenticated student and teacher portal for the C-Grade engine."""
+
+#TEACHER_USERNAME=
+#TEACHER_PASSWORD=
+#CGRADE_SESSION_SECRET=your-long-random-secret-key
 
 import json
 import os
@@ -535,12 +540,7 @@ def new_assignment_view() -> None:
                 height=80,
                 key=f"new_assignment_sample_{form_version}",
             )
-            sample_output = st.text_area(
-                "Sample output",
-                value=saved_form.get("sample_output", "30"),
-                height=80,
-                key=f"new_assignment_sample_output_{form_version}",
-            )
+            
         with col2:
             expected_complexity = st.selectbox(
                 "Expected asymptotic complexity",
@@ -554,6 +554,12 @@ def new_assignment_view() -> None:
                 "Auto-generated I/O test cases", min_value=1, max_value=20,
                 value=int(saved_form.get("auto_gen_count", 5)), step=1,
                 key=f"new_assignment_io_count_{form_version}",
+            )
+            sample_output = st.text_area(
+                "Sample output",
+                value=saved_form.get("sample_output", "30"),
+                height=80,
+                key=f"new_assignment_sample_output_{form_version}",
             )
 
         st.markdown("#### Teacher reference solution (`oracle.c`)")
@@ -909,16 +915,21 @@ def assignment_materials_view(assignments) -> None:
 
     def edit_case_files(case_files, category: str, heading: str) -> None:
         st.markdown(f"#### {heading}")
+
+        # Display and edit all existing cases.
         if not case_files:
             st.info("No test cases found.")
-            return
+
         for input_path in case_files:
             case_name = input_path.stem
             output_path = input_path.with_suffix(".out")
             with st.expander(case_name):
                 left, right = st.columns(2)
                 input_value = input_path.read_text(encoding="utf-8", errors="replace")
-                output_value = output_path.read_text(encoding="utf-8", errors="replace") if output_path.is_file() else ""
+                output_value = (
+                    output_path.read_text(encoding="utf-8", errors="replace")
+                    if output_path.is_file() else ""
+                )
                 with left:
                     edited_input = st.text_area(
                         "Standard input (.in)", value=input_value, height=150,
@@ -929,19 +940,111 @@ def assignment_materials_view(assignments) -> None:
                         "Expected output (.out)", value=output_value, height=150,
                         key=f"case_out_{problem_id}_{category}_{case_name}",
                     )
-                if st.button(
-                    f"Save {case_name}",
-                    key=f"save_case_{problem_id}_{category}_{case_name}",
-                ):
-                    input_path.write_text(edited_input, encoding="utf-8")
-                    output_path.write_text(edited_output, encoding="utf-8")
-                    st.success(f"{case_name} input and expected output saved.")
+
+                save_col, delete_col = st.columns([1, 1])
+                with save_col:
+                    if st.button(
+                        f"Save {case_name}",
+                        key=f"save_case_{problem_id}_{category}_{case_name}",
+                        width="stretch",
+                    ):
+                        input_path.write_text(edited_input, encoding="utf-8")
+                        output_path.write_text(edited_output, encoding="utf-8")
+                        st.success(f"{case_name} input and expected output saved.")
+                        st.rerun()
+
+                with delete_col:
+                    # Delete immediately, without a confirmation prompt.
+                    if st.button(
+                        f"Delete {case_name}",
+                        key=f"delete_case_{problem_id}_{category}_{case_name}",
+                        type="secondary",
+                        width="stretch",
+                    ):
+                        input_path.unlink(missing_ok=True)
+                        output_path.unlink(missing_ok=True)
+                        st.session_state.pop(
+                            f"case_in_{problem_id}_{category}_{case_name}", None
+                        )
+                        st.session_state.pop(
+                            f"case_out_{problem_id}_{category}_{case_name}", None
+                        )
+                        st.success(f"{case_name} deleted.")
+                        st.rerun()
+
+        # Add-case controls are shown after the existing cases, including when
+        # the category currently has no cases.
+        add_state_key = f"show_add_case_{problem_id}_{category}"
+        if st.button(
+            "Add new I/O case" if category == "io" else "Add new edge case",
+            key=f"add_case_button_{problem_id}_{category}",
+            type="primary",
+        ):
+            st.session_state[add_state_key] = True
+
+        if st.session_state.get(add_state_key, False):
+            st.markdown(f"**New {category.upper()} test case**")
+            with st.form(f"add_case_form_{problem_id}_{category}"):
+                new_input = st.text_area(
+                    "Standard input (.in)", height=120,
+                    key=f"new_case_in_{problem_id}_{category}",
+                )
+                new_output = st.text_area(
+                    "Expected output (.out)", height=120,
+                    key=f"new_case_out_{problem_id}_{category}",
+                )
+                add_col, cancel_col = st.columns(2)
+                with add_col:
+                    add_submitted = st.form_submit_button(
+                        "Save new case", type="primary", width="stretch"
+                    )
+                with cancel_col:
+                    cancel_add = st.form_submit_button(
+                        "Cancel", width="stretch"
+                    )
+
+            if cancel_add:
+                st.session_state[add_state_key] = False
+                st.session_state.pop(f"new_case_in_{problem_id}_{category}", None)
+                st.session_state.pop(f"new_case_out_{problem_id}_{category}", None)
+                st.rerun()
+
+            if add_submitted:
+                if not new_input.strip():
+                    st.error("Standard input cannot be empty.")
+                else:
+                    if category == "io":
+                        destination_dir = tests_dir / "auto_generated"
+                        filename_prefix = "gen_"
+                    else:
+                        destination_dir = tests_dir / "edge_cases"
+                        filename_prefix = "edge_"
+
+                    destination_dir.mkdir(parents=True, exist_ok=True)
+                    case_number = 1
+                    while True:
+                        # Keep the same two-digit suffix for both extensions:
+                        # gen_05.in / gen_05.out and edge_05.in / edge_05.out.
+                        case_stem = f"{filename_prefix}{case_number:02d}"
+                        new_input_path = destination_dir / f"{case_stem}.in"
+                        new_output_path = destination_dir / f"{case_stem}.out"
+                        if not new_input_path.exists() and not new_output_path.exists():
+                            break
+                        case_number += 1
+                    new_input_path.write_text(new_input, encoding="utf-8")
+                    new_output_path.write_text(new_output, encoding="utf-8")
+
+                    st.session_state[add_state_key] = False
+                    st.session_state.pop(f"new_case_in_{problem_id}_{category}", None)
+                    st.session_state.pop(f"new_case_out_{problem_id}_{category}", None)
+                    st.success(f"Added {new_input_path.stem}.")
                     st.rerun()
 
     st.markdown("#### Generated and editable test cases")
     io_files = sorted((tests_dir / "auto_generated").glob("gen_*.in"))
     if not io_files:
         io_files = sorted(tests_dir.glob("*.in"))
+    edge_files = sorted((tests_dir / "edge_cases").glob("edge_*.in"))
     edit_case_files(io_files, "io", "Standard I/O cases")
     edit_case_files(edge_files, "edge", "Adversarial edge cases")
 
