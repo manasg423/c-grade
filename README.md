@@ -5,6 +5,9 @@
 C-Grade Engine helps instructors evaluate C programs using a collection of specialist analyzers. It checks whether a submission compiles and runs, compares its output with reference-generated tests, checks for memory and code-quality issues, and produces a detailed assessment report.
 
 The project is used through a web portal: teachers create assignments and manage students, while students submit C source files and view their evaluation results.
+## Project Demo
+
+[![C-Grade Engine Demo](https://img.youtube.com/vi/Al8AHrK8N9c/maxresdefault.jpg)](https://www.youtube.com/watch?v=Al8AHrK8N9c)
 
 **GitHub repository:** [https://github.com/manasg423/c-grade](https://github.com/manasg423/c-grade)
 
