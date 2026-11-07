@@ -594,6 +594,19 @@ Potential areas for future development include:
 - More detailed instructor analytics and configurable report formats.
 - Fine-grained user roles and administrative controls.
 
+## Authors
+
+This project was developed by the following students of the **Department of Computer Science and Engineering, Indian Institute of Technology Patna**, under the guidance of **Dr. Arijit Mondal, Assistant Professor**.
+
+- **Manas Gogna** (2611CS10)
+- **Husain Kanchwala** (2611CS04)
+- **Adnan Hasan** (2611MC09)
+- **Jay Agrawal** (2611AI09)
+
+**Institution:** Indian Institute of Technology Patna  
+**Department:** Computer Science and Engineering  
+**Project Supervisor:** Dr. Arijit Mondal, Assistant Professor
+
 ## Contributing
 
 Contributions, bug reports, and suggestions are welcome.
